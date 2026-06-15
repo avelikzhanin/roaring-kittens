@@ -1,7 +1,8 @@
 from decimal import Decimal
 
+from roaring_kittens.ai.schemas import AnalystReport
 from roaring_kittens.broker.models import PortfolioSnapshot, Position
-from roaring_kittens.telegram.formatting import format_portfolio
+from roaring_kittens.telegram.formatting import format_analyst_report, format_portfolio
 
 
 def _pos(ticker, qty, avg, cur, pnl):
@@ -24,3 +25,13 @@ def test_format_portfolio_contains_positions_and_total():
 def test_format_empty_portfolio():
     text = format_portfolio(PortfolioSnapshot(total_value=Decimal("0"), positions=[]))
     assert "пуст" in text.lower()
+
+
+def test_format_analyst_report():
+    r = AnalystReport(ticker="SBER", stance="bullish",
+                      summary="Выглядит сильно.", key_points=["Прибыль растёт"],
+                      risks=["Перекупленность"], confidence=0.8)
+    text = format_analyst_report(r)
+    assert "SBER" in text and "🟢" in text          # bullish → зелёный
+    assert "Прибыль растёт" in text and "Перекупленность" in text
+    assert "80%" in text                              # confidence

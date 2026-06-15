@@ -1,6 +1,9 @@
 from decimal import ROUND_HALF_UP, Decimal
 
+from roaring_kittens.ai.schemas import AnalystReport
 from roaring_kittens.broker.models import PortfolioSnapshot
+
+STANCE_EMOJI = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪️"}
 
 
 def _fmt_money(v: Decimal) -> str:
@@ -21,4 +24,22 @@ def format_portfolio(snap: PortfolioSnapshot) -> str:
             f"<b>{p.ticker}</b> · {p.quantity} шт · "
             f"{p.avg_price} → {p.current_price} ₽ · {_fmt_pct(p.pnl_pct)}"
         )
+    return "\n".join(lines)
+
+
+def format_analyst_report(r: AnalystReport) -> str:
+    lines = [
+        f"{STANCE_EMOJI[r.stance]} <b>{r.ticker}</b> — {r.stance} "
+        f"(уверенность {round(r.confidence * 100)}%)",
+        "",
+        r.summary,
+        "",
+        "<b>Ключевое:</b>",
+        *[f"• {p}" for p in r.key_points],
+        "",
+        "<b>Риски:</b>",
+        *[f"⚠️ {p}" for p in r.risks],
+        "",
+        "<i>Это аналитический разбор, не инвестрекомендация.</i>",
+    ]
     return "\n".join(lines)
