@@ -1,0 +1,19 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: kittens
+      POSTGRES_PASSWORD: kittens
+      POSTGRES_DB: kittens
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+  app:
+    build: .
+    env_file: .env
+    depends_on:
+      - db
+volumes:
+  pgdata:
