@@ -5,7 +5,7 @@ description = "Telegram-native AI investment co-pilot for MOEX"
 requires-python = ">=3.12"
 dependencies = [
     "aiogram>=3.7",
-    "tinkoff-investments>=0.2.0b57",
+    "tinkoff-investments @ git+https://github.com/RussianInvestments/invest-python.git@0.2.0-beta117",
     "openai>=1.50",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
