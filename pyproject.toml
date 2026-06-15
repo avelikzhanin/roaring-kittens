@@ -9,6 +9,9 @@ dependencies = [
     # We provide its real runtime deps here; the `tinkoff` namespace shim is unneeded under PEP 420.
     "grpcio>=1.59",
     "protobuf>=4.25,<5",
+    "cachetools>=5.2",
+    "python-dateutil>=2.8.2",
+    "deprecation>=2.1",
     "openai>=1.50",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
