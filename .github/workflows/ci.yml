@@ -30,5 +30,7 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install -e ".[dev]"
+      - name: Install Tinkoff SDK (git-only, no transitive shim)
+        run: pip install --no-deps "tinkoff-investments @ git+https://github.com/RussianInvestments/invest-python.git@0.2.0-beta117"
       - name: Run tests
         run: python -m pytest -v

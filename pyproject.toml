@@ -5,7 +5,10 @@ description = "Telegram-native AI investment co-pilot for MOEX"
 requires-python = ">=3.12"
 dependencies = [
     "aiogram>=3.7",
-    "tinkoff-investments @ git+https://github.com/RussianInvestments/invest-python.git@0.2.0-beta117",
+    # Official Tinkoff SDK is git-only (removed from PyPI); installed --no-deps in CI/Docker.
+    # We provide its real runtime deps here; the `tinkoff` namespace shim is unneeded under PEP 420.
+    "grpcio>=1.59",
+    "protobuf>=4.25,<5",
     "openai>=1.50",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
