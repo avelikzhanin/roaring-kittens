@@ -1,15 +1,17 @@
+import os
+
+import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from tests.conftest import TEST_DB, requires_db
-
 from roaring_kittens.db.schema import ensure_schema
 
-pytestmark = requires_db
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("TEST_DATABASE_URL"), reason="TEST_DATABASE_URL not set")
 
 
 async def test_ensure_schema_creates_tables_idempotently():
-    engine = create_async_engine(TEST_DB)
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
     try:
         # дважды — проверяем идемпотентность (CREATE ... IF NOT EXISTS)
         await ensure_schema(engine)
