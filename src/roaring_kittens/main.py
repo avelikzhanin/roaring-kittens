@@ -9,6 +9,7 @@ from roaring_kittens.ai.llm import LLM, make_db_usage_logger
 from roaring_kittens.broker.tinkoff_client import TinkoffBroker
 from roaring_kittens.config import Settings
 from roaring_kittens.db.engine import make_engine, make_session_factory
+from roaring_kittens.db.schema import ensure_schema
 from roaring_kittens.deps import Deps
 from roaring_kittens.logging_setup import configure_logging
 from roaring_kittens.scheduler import build_scheduler, poll_news
@@ -24,6 +25,7 @@ async def run() -> None:
     settings = Settings()
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
+    await ensure_schema(engine)  # идемпотентно: создаёт таблицы при первом старте
 
     broker = TinkoffBroker(settings.tinkoff_token)
     universe = Universe(broker=broker)
