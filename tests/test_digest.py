@@ -22,6 +22,11 @@ def test_build_digest_contains_portfolio_news_and_ai():
     assert "Рынок спокоен" in text
 
 
+def test_build_digest_renders_news_as_clickable_links():
+    text = build_digest_text(SNAP, NEWS, ai_summary=None)
+    assert '<a href="https://x/1">Сбер: рекордная прибыль</a>' in text
+
+
 def test_build_digest_without_news():
     text = build_digest_text(SNAP, {}, ai_summary=None)
     assert "нет свежих новостей" in text.lower()

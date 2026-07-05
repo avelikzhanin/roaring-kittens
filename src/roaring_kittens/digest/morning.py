@@ -3,11 +3,13 @@ from datetime import datetime, timedelta, timezone
 import structlog
 from pydantic import BaseModel, Field
 
-from roaring_kittens.broker.models import PortfolioSnapshot
+from roaring_kittens.ai.analyst import run_analyst
+from roaring_kittens.broker.models import PortfolioSnapshot, Position
+from roaring_kittens.broker.tech import compute_tech_summary
 from roaring_kittens.deps import Deps
 from roaring_kittens.news.models import NewsItem
 from roaring_kittens.news.repository import get_news_for_tickers
-from roaring_kittens.telegram.formatting import format_portfolio
+from roaring_kittens.telegram.formatting import STANCE_EMOJI, format_portfolio
 
 log = structlog.get_logger()
 
@@ -31,13 +33,26 @@ def build_digest_text(snap: PortfolioSnapshot, news_by_ticker: dict[str, list[Ne
         parts.append("📰 <b>Новости по позициям:</b>")
         for ticker, items in news_by_ticker.items():
             for n in items[:3]:
-                parts.append(f"• <b>{ticker}</b>: {n.headline}")
+                parts.append(f'• <b>{ticker}</b>: <a href="{n.url}">{n.headline}</a>')
         parts.append("")
     else:
         parts.append("📰 По твоим позициям нет свежих новостей.\n")
     if ai_summary:
         parts.append(f"🤖 {ai_summary}")
     return "\n".join(parts)
+
+
+async def build_spotlight(deps: Deps, position: Position) -> str | None:
+    """Разбор дня для тихого утра (нет новостей) — переиспользует одиночный аналитик."""
+    try:
+        candles = await deps.broker.get_daily_candles(position.figi)
+        tech = compute_tech_summary(candles)
+        report = await run_analyst(deps.llm, position.ticker, tech, [], None)
+    except Exception as exc:
+        log.error("spotlight_failed", ticker=position.ticker, error=str(exc))
+        return None
+    emoji = STANCE_EMOJI.get(report.stance, "")
+    return f"🔎 <b>Разбор дня — {position.ticker}</b> {emoji}\n{report.summary}"
 
 
 async def run_morning_digest(deps: Deps, bot, chat_id: int) -> None:
@@ -70,5 +85,15 @@ async def run_morning_digest(deps: Deps, bot, chat_id: int) -> None:
         except Exception as exc:
             log.error("digest_llm_failed", error=str(exc))
 
-    await bot.send_message(chat_id, build_digest_text(snap, news_by_ticker, ai_summary))
-    log.info("digest_sent", tickers=len(tickers), with_ai=ai_summary is not None)
+    text = build_digest_text(snap, news_by_ticker, ai_summary)
+
+    # Тихое утро: новостей нет, но дайджест не должен быть пустым — даём разбор дня по ротации.
+    if not news_by_ticker and snap.positions:
+        idx = datetime.now(tz=timezone.utc).timetuple().tm_yday % len(snap.positions)
+        spotlight = await build_spotlight(deps, snap.positions[idx])
+        if spotlight:
+            text += "\n\n" + spotlight
+
+    await bot.send_message(chat_id, text)
+    log.info("digest_sent", tickers=len(tickers), with_ai=ai_summary is not None,
+             quiet_day=not news_by_ticker)
