@@ -1,7 +1,9 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from roaring_kittens.ai.schemas import AnalystReport
 from roaring_kittens.broker.models import PortfolioSnapshot, Position
+from roaring_kittens.news.models import NewsItem
 from roaring_kittens.telegram.formatting import format_analyst_report, format_portfolio
 
 
@@ -27,6 +29,19 @@ def test_format_empty_portfolio():
     assert "пуст" in text.lower()
 
 
+def test_format_portfolio_movers_first_and_arrows():
+    snap = PortfolioSnapshot(
+        total_value=Decimal("1000000"),
+        positions=[_pos("AAA", "1", "100", "90", "-10.0"),
+                   _pos("BBB", "1", "100", "120", "20.0")],
+    )
+    text = format_portfolio(snap)
+    # лидер BBB должен идти раньше аутсайдера AAA
+    assert text.index("BBB") < text.index("AAA")
+    assert "▲" in text and "▼" in text
+    assert "Лидер" in text and "Аутсайдер" in text
+
+
 def test_format_analyst_report():
     r = AnalystReport(ticker="SBER", stance="bullish",
                       summary="Выглядит сильно.", key_points=["Прибыль растёт"],
@@ -35,3 +50,21 @@ def test_format_analyst_report():
     assert "SBER" in text and "🟢" in text          # bullish → зелёный
     assert "Прибыль растёт" in text and "Перекупленность" in text
     assert "80%" in text                              # confidence
+
+
+def test_format_analyst_report_caps_confidence_on_low_data():
+    r = AnalystReport(ticker="SBER", stance="bullish", summary="s",
+                      key_points=["k"], risks=["r"], confidence=0.85)
+    text = format_analyst_report(r, low_data=True)
+    assert "85%" not in text
+    assert "40%" in text and "мало данных" in text
+
+
+def test_format_analyst_report_renders_clickable_sources():
+    r = AnalystReport(ticker="SBER", stance="neutral", summary="s",
+                      key_points=["k"], risks=["r"], confidence=0.5)
+    src = [NewsItem(source="rbc", url="https://x/1", headline="Заголовок",
+                    body=None, published_at=datetime.now(tz=timezone.utc), tickers=["SBER"])]
+    text = format_analyst_report(r, sources=src)
+    assert '<a href="https://x/1">Заголовок</a>' in text
+    assert "Источники" in text
