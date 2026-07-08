@@ -32,3 +32,4 @@ async def test_run_analyst_calls_llm_with_schema():
     assert kwargs["schema"] is AnalystReport
     assert kwargs["model"] == "gpt-4o"
     assert kwargs["operation"] == "analyst"
+    assert kwargs["temperature"] == 0.2  # стабильность повторных разборов

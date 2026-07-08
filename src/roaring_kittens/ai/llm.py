@@ -28,10 +28,12 @@ class LLM:
 
     @retry_async(attempts=3, base_delay=2.0)
     async def parse(self, *, model: str, operation: str,
-                    messages: list[dict], schema: type[T]) -> T:
-        resp = await self._parse_fn()(
-            model=model, messages=messages, response_format=schema,
-        )
+                    messages: list[dict], schema: type[T],
+                    temperature: float | None = None) -> T:
+        kwargs: dict[str, Any] = dict(model=model, messages=messages, response_format=schema)
+        if temperature is not None:
+            kwargs["temperature"] = temperature  # reasoning-модели (o-серия) не принимают — не передаём
+        resp = await self._parse_fn()(**kwargs)
         u = resp.usage
         cost = estimate_cost(model, u.prompt_tokens, u.completion_tokens)
         await self._log_usage(operation, model, u.prompt_tokens, u.completion_tokens, cost)

@@ -17,20 +17,14 @@ MAIN_MENU = ReplyKeyboardMarkup(
 
 HELP_TEXT = (
     "🐱📈 <b>Roaring Kittens</b> — AI-аналитик по Мосбирже.\n\n"
-    "<b>Команды:</b>\n"
-    "• <code>/ask ТИКЕР [вопрос]</code> — разбор бумаги (доступно всем)\n"
-    "   напр. <code>/ask SBER</code> или <code>/ask SBER стоит докупать?</code>\n"
-    "• <code>/portfolio</code> — портфель и P&amp;L (только владелец)\n"
-    "• <code>/digest</code> — сводка по портфелю (только владелец)\n\n"
-    "Владельцу каждое утро в 9:00 МСК приходит дайджест."
+    "<b>Как спросить про бумагу (доступно всем):</b>\n"
+    "• Жми «💡 Спросить» — покажу кнопки с тикерами и готовыми вопросами\n"
+    "• Или напиши руками: <code>/ask SBER</code>, <code>/ask SBER стоит докупать?</code>\n\n"
+    "<b>Только для владельца:</b>\n"
+    "• <code>/portfolio</code> — портфель и P&amp;L\n"
+    "• <code>/digest</code> — сводка по портфелю\n"
+    "• Каждое утро в 9:00 МСК дайджест приходит сам."
 )
-
-ASK_PROMPT = (
-    "💡 Спроси меня о любой бумаге Мосбиржи.\n\n"
-    "Напиши: <code>/ask ТИКЕР</code> — например <code>/ask GAZP</code>.\n"
-    "Можно с вопросом: <code>/ask SBER стоит докупать?</code>"
-)
-
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, deps: Deps) -> None:
@@ -59,8 +53,3 @@ async def cmd_start(message: Message, deps: Deps) -> None:
 @router.message(F.text == "❓ Помощь")
 async def cmd_help(message: Message) -> None:
     await message.answer(HELP_TEXT, reply_markup=MAIN_MENU)
-
-
-@router.message(F.text == "💡 Спросить")
-async def btn_ask(message: Message) -> None:
-    await message.answer(ASK_PROMPT)

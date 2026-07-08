@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
 import structlog
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from roaring_kittens.ai.analyst import run_analyst
 from roaring_kittens.broker.tech import compute_tech_summary
@@ -11,34 +11,60 @@ from roaring_kittens.db.owner import fetch_owner_id
 from roaring_kittens.deps import Deps
 from roaring_kittens.news.repository import get_news_for_tickers
 from roaring_kittens.telegram.formatting import format_analyst_report
+from roaring_kittens.universe.universe import Instrument
 
 log = structlog.get_logger()
 router = Router()
 
 USAGE = "Формат: <code>/ask SBER</code> или <code>/ask SBER стоит докупать?</code>"
 
-
 LIMIT_REACHED = ("⏳ Лимит запросов на сегодня исчерпан ({limit}/день для гостей). "
                  "Приходи завтра!")
 
+# Для гостей и пустого портфеля — самые ходовые бумаги IMOEX.
+POPULAR_TICKERS = ["SBER", "GAZP", "LKOH", "YDEX", "T", "OZON", "ROSN", "MGNT"]
 
-@router.message(Command("ask"))
-async def cmd_ask(message: Message, command: CommandObject, deps: Deps) -> None:
-    if not command.args:
-        await message.answer(USAGE)
-        return
+# Пресеты вопросов: callback-код -> (подпись кнопки, текст вопроса аналитику)
+QUESTION_PRESETS: dict[str, tuple[str, str | None]] = {
+    "full": ("📊 Общий разбор", None),
+    "buy": ("🛒 Стоит покупать?", "стоит покупать сейчас?"),
+    "sell": ("💸 Стоит продавать?", "стоит продавать сейчас?"),
+}
+
+
+def build_ticker_keyboard(tickers: list[str]) -> InlineKeyboardMarkup:
+    """Сетка тикеров 4 в ряд, callback ask:<TICKER>."""
+    rows, row = [], []
+    for t in tickers[:12]:
+        row.append(InlineKeyboardButton(text=t, callback_data=f"ask:{t}"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_question_keyboard(ticker: str) -> InlineKeyboardMarkup:
+    """Пресеты вопросов для выбранного тикера, callback askq:<TICKER>:<preset>."""
+    full_label = QUESTION_PRESETS["full"][0]
+    buy_label = QUESTION_PRESETS["buy"][0]
+    sell_label = QUESTION_PRESETS["sell"][0]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=full_label, callback_data=f"askq:{ticker}:full")],
+        [InlineKeyboardButton(text=buy_label, callback_data=f"askq:{ticker}:buy"),
+         InlineKeyboardButton(text=sell_label, callback_data=f"askq:{ticker}:sell")],
+    ])
+
+
+async def _guest_over_limit(deps: Deps, user_id: int) -> bool:
     owner_id = await fetch_owner_id(deps.session_factory)
-    if message.from_user.id != owner_id and not deps.ask_limiter.allow(message.from_user.id):
-        await message.answer(LIMIT_REACHED.format(limit=deps.ask_limiter.limit))
-        return
-    parts = command.args.split(maxsplit=1)
-    instrument = deps.universe.resolve(parts[0])
-    if instrument is None:
-        await message.answer(f"Не знаю бумагу «{parts[0]}». {USAGE}")
-        return
-    question = parts[1] if len(parts) > 1 else None
+    return user_id != owner_id and not deps.ask_limiter.allow(user_id)
 
-    progress = await message.answer(f"🤖 Анализирую {instrument.ticker}…")
+
+async def _analyze_and_edit(progress: Message, deps: Deps,
+                            instrument: Instrument, question: str | None) -> None:
+    """Общее ядро /ask: собрать контекст, прогнать аналитик, отредактировать сообщение."""
     try:
         candles = await deps.broker.get_daily_candles(instrument.figi)
         tech = compute_tech_summary(candles)
@@ -53,8 +79,75 @@ async def cmd_ask(message: Message, command: CommandObject, deps: Deps) -> None:
             f"Попробуй ещё раз: <code>/ask {instrument.ticker}</code>"
         )
         return
-
     low_data = tech is None or not news
     await progress.edit_text(
         format_analyst_report(report, low_data=low_data, sources=news or None)
     )
+
+
+@router.message(Command("ask"))
+async def cmd_ask(message: Message, command: CommandObject, deps: Deps) -> None:
+    if not command.args:
+        await show_ticker_picker(message, deps)
+        return
+    parts = command.args.split(maxsplit=1)
+    instrument = deps.universe.resolve(parts[0])
+    if instrument is None:
+        await message.answer(f"Не знаю бумагу «{parts[0]}». {USAGE}")
+        return
+    if await _guest_over_limit(deps, message.from_user.id):
+        await message.answer(LIMIT_REACHED.format(limit=deps.ask_limiter.limit))
+        return
+    question = parts[1] if len(parts) > 1 else None
+    progress = await message.answer(f"🤖 Анализирую {instrument.ticker}…")
+    await _analyze_and_edit(progress, deps, instrument, question)
+
+
+@router.message(F.text == "💡 Спросить")
+async def btn_ask(message: Message, deps: Deps) -> None:
+    await show_ticker_picker(message, deps)
+
+
+async def show_ticker_picker(message: Message, deps: Deps) -> None:
+    """Владельцу — тикеры его портфеля, гостям — популярные из IMOEX."""
+    tickers = [t for t in POPULAR_TICKERS if deps.universe.get(t)]
+    owner_id = await fetch_owner_id(deps.session_factory)
+    if message.from_user.id == owner_id:
+        try:
+            snap = await deps.broker.get_portfolio()
+            portfolio_tickers = [p.ticker for p in snap.positions
+                                 if deps.universe.get(p.ticker)]
+            if portfolio_tickers:
+                tickers = portfolio_tickers
+        except Exception as exc:
+            log.warning("ticker_picker_portfolio_failed", error=str(exc))
+    await message.answer(
+        "💡 Выбери бумагу для разбора — или напиши вручную:\n" + USAGE,
+        reply_markup=build_ticker_keyboard(tickers),
+    )
+
+
+@router.callback_query(F.data.startswith("ask:"))
+async def cb_pick_ticker(callback: CallbackQuery, deps: Deps) -> None:
+    ticker = callback.data.split(":", 1)[1]
+    await callback.message.edit_text(
+        f"💡 <b>{ticker}</b> — что разобрать?",
+        reply_markup=build_question_keyboard(ticker),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("askq:"))
+async def cb_run_ask(callback: CallbackQuery, deps: Deps) -> None:
+    _, ticker, preset = callback.data.split(":", 2)
+    await callback.answer()
+    instrument = deps.universe.resolve(ticker)
+    if instrument is None:
+        await callback.message.edit_text(f"Не знаю бумагу «{ticker}». {USAGE}")
+        return
+    if await _guest_over_limit(deps, callback.from_user.id):
+        await callback.message.edit_text(LIMIT_REACHED.format(limit=deps.ask_limiter.limit))
+        return
+    question = QUESTION_PRESETS.get(preset, QUESTION_PRESETS["full"])[1]
+    await callback.message.edit_text(f"🤖 Анализирую {instrument.ticker}…")
+    await _analyze_and_edit(callback.message, deps, instrument, question)

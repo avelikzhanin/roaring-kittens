@@ -43,5 +43,6 @@ def build_analyst_messages(ticker: str, tech: TechSummary | None,
 async def run_analyst(llm: LLM, ticker: str, tech: TechSummary | None,
                       news: list[NewsItem], question: str | None) -> AnalystReport:
     messages = build_analyst_messages(ticker, tech, news, question)
+    # temperature=0.2: снижаем разброс между повторными разборами одной бумаги
     return await llm.parse(model=ANALYST_MODEL, operation="analyst",
-                           messages=messages, schema=AnalystReport)
+                           messages=messages, schema=AnalystReport, temperature=0.2)
