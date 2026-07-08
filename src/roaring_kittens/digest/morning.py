@@ -78,7 +78,7 @@ async def run_morning_digest(deps: Deps, bot, chat_id: int) -> None:
                 model=DIGEST_MODEL, operation="morning_digest",
                 messages=[{"role": "system", "content": DIGEST_SYSTEM},
                           {"role": "user", "content": f"Портфель: {positions}\n\nНовости:\n{headlines}"}],
-                schema=DigestSummary, temperature=0.2,
+                schema=DigestSummary,
             )
             watch = "".join(f"\n• {w}" for w in result.watch_today)
             ai_summary = result.market_comment + (f"\n\n👀 <b>Следить:</b>{watch}" if watch else "")

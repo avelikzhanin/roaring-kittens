@@ -24,16 +24,9 @@ LIMIT_REACHED = ("⏳ Лимит запросов на сегодня исчер
 # Для гостей и пустого портфеля — самые ходовые бумаги IMOEX.
 POPULAR_TICKERS = ["SBER", "GAZP", "LKOH", "YDEX", "T", "OZON", "ROSN", "MGNT"]
 
-# Пресеты вопросов: callback-код -> (подпись кнопки, текст вопроса аналитику)
-QUESTION_PRESETS: dict[str, tuple[str, str | None]] = {
-    "full": ("📊 Общий разбор", None),
-    "buy": ("🛒 Стоит покупать?", "стоит покупать сейчас?"),
-    "sell": ("💸 Стоит продавать?", "стоит продавать сейчас?"),
-}
-
 
 def build_ticker_keyboard(tickers: list[str]) -> InlineKeyboardMarkup:
-    """Сетка тикеров 4 в ряд, callback ask:<TICKER>."""
+    """Сетка тикеров 4 в ряд, callback ask:<TICKER>. Тап — сразу разбор."""
     rows, row = [], []
     for t in tickers[:12]:
         row.append(InlineKeyboardButton(text=t, callback_data=f"ask:{t}"))
@@ -43,18 +36,6 @@ def build_ticker_keyboard(tickers: list[str]) -> InlineKeyboardMarkup:
     if row:
         rows.append(row)
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def build_question_keyboard(ticker: str) -> InlineKeyboardMarkup:
-    """Пресеты вопросов для выбранного тикера, callback askq:<TICKER>:<preset>."""
-    full_label = QUESTION_PRESETS["full"][0]
-    buy_label = QUESTION_PRESETS["buy"][0]
-    sell_label = QUESTION_PRESETS["sell"][0]
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=full_label, callback_data=f"askq:{ticker}:full")],
-        [InlineKeyboardButton(text=buy_label, callback_data=f"askq:{ticker}:buy"),
-         InlineKeyboardButton(text=sell_label, callback_data=f"askq:{ticker}:sell")],
-    ])
 
 
 async def _guest_over_limit(deps: Deps, user_id: int) -> bool:
@@ -122,24 +103,16 @@ async def show_ticker_picker(message: Message, deps: Deps) -> None:
         except Exception as exc:
             log.warning("ticker_picker_portfolio_failed", error=str(exc))
     await message.answer(
-        "💡 Выбери бумагу для разбора — или напиши вручную:\n" + USAGE,
+        "💡 Тапни бумагу — сделаю разбор.\n"
+        "Свой вопрос — руками: <code>/ask SBER что с дивидендами?</code>",
         reply_markup=build_ticker_keyboard(tickers),
     )
 
 
+@router.callback_query(F.data.startswith("askq:"))  # старые сообщения с пресетами
 @router.callback_query(F.data.startswith("ask:"))
-async def cb_pick_ticker(callback: CallbackQuery, deps: Deps) -> None:
-    ticker = callback.data.split(":", 1)[1]
-    await callback.message.edit_text(
-        f"💡 <b>{ticker}</b> — что разобрать?",
-        reply_markup=build_question_keyboard(ticker),
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("askq:"))
 async def cb_run_ask(callback: CallbackQuery, deps: Deps) -> None:
-    _, ticker, preset = callback.data.split(":", 2)
+    ticker = callback.data.split(":")[1]
     await callback.answer()
     instrument = deps.universe.resolve(ticker)
     if instrument is None:
@@ -148,6 +121,5 @@ async def cb_run_ask(callback: CallbackQuery, deps: Deps) -> None:
     if await _guest_over_limit(deps, callback.from_user.id):
         await callback.message.edit_text(LIMIT_REACHED.format(limit=deps.ask_limiter.limit))
         return
-    question = QUESTION_PRESETS.get(preset, QUESTION_PRESETS["full"])[1]
     await callback.message.edit_text(f"🤖 Анализирую {instrument.ticker}…")
-    await _analyze_and_edit(callback.message, deps, instrument, question)
+    await _analyze_and_edit(callback.message, deps, instrument, None)
