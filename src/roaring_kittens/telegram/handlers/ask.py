@@ -1,3 +1,4 @@
+import random
 from datetime import datetime, timedelta, timezone
 
 import structlog
@@ -22,19 +23,42 @@ LIMIT_REACHED = ("⏳ Лимит запросов на сегодня исчер
                  "Приходи завтра!")
 
 # Для гостей и пустого портфеля — самые ходовые бумаги IMOEX.
-POPULAR_TICKERS = ["SBER", "GAZP", "LKOH", "YDEX", "T", "OZON", "ROSN", "MGNT"]
+# (MGNT исключён: Магнит вылетел из индекса, universe его не знает.)
+POPULAR_TICKERS = ["SBER", "GAZP", "LKOH", "YDEX", "T", "OZON", "ROSN", "NVTK"]
+
+# Пул примеров для подсказки «свой вопрос» — показываем случайные при каждом открытии.
+EXAMPLE_QUESTIONS = [
+    "что с дивидендами?",
+    "почему падает?",
+    "почему растёт?",
+    "какие главные риски?",
+    "стоит докупать?",
+    "что говорят последние новости?",
+    "как выглядит техническая картина?",
+    "дешёвая ли бумага сейчас?",
+]
 
 
-def build_ticker_keyboard(tickers: list[str]) -> InlineKeyboardMarkup:
+def pick_examples(tickers: list[str], n: int = 2) -> list[str]:
+    """n случайных примеров вида '/ask TICKER вопрос' со случайными тикерами."""
+    questions = random.sample(EXAMPLE_QUESTIONS, k=min(n, len(EXAMPLE_QUESTIONS)))
+    pool = tickers or ["SBER"]
+    return [f"/ask {random.choice(pool)} {q}" for q in questions]
+
+
+def build_ticker_keyboard(tickers: list[str], cap: int = 12,
+                          with_all_button: bool = False) -> InlineKeyboardMarkup:
     """Сетка тикеров 4 в ряд, callback ask:<TICKER>. Тап — сразу разбор."""
     rows, row = [], []
-    for t in tickers[:12]:
+    for t in tickers[:cap]:
         row.append(InlineKeyboardButton(text=t, callback_data=f"ask:{t}"))
         if len(row) == 4:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
+    if with_all_button:
+        rows.append([InlineKeyboardButton(text="📜 Все бумаги", callback_data="ask_all")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -102,11 +126,21 @@ async def show_ticker_picker(message: Message, deps: Deps) -> None:
                 tickers = portfolio_tickers
         except Exception as exc:
             log.warning("ticker_picker_portfolio_failed", error=str(exc))
+    examples = "\n".join(f"<code>{e}</code>" for e in pick_examples(tickers))
     await message.answer(
-        "💡 Тапни бумагу — сделаю разбор.\n"
-        "Свой вопрос — руками: <code>/ask SBER что с дивидендами?</code>",
-        reply_markup=build_ticker_keyboard(tickers),
+        f"💡 Тапни бумагу — сделаю разбор.\n\nИли задай свой вопрос, например:\n{examples}",
+        reply_markup=build_ticker_keyboard(tickers, with_all_button=True),
     )
+
+
+@router.callback_query(F.data == "ask_all")
+async def cb_show_all(callback: CallbackQuery, deps: Deps) -> None:
+    tickers = sorted(deps.universe.tickers())
+    await callback.message.edit_text(
+        f"💡 Все бумаги universe ({len(tickers)}) — тапни для разбора:",
+        reply_markup=build_ticker_keyboard(tickers, cap=len(tickers)),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("askq:"))  # старые сообщения с пресетами
