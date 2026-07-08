@@ -3,6 +3,8 @@ from pathlib import Path
 import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from roaring_kittens.utils.retry import retry_async
+
 log = structlog.get_logger()
 
 
@@ -19,8 +21,12 @@ def _find_schema_sql() -> Path:
     raise FileNotFoundError(f"db/schema.sql not found in {candidates}")
 
 
+@retry_async(attempts=6, base_delay=2.0)
 async def ensure_schema(engine: AsyncEngine) -> None:
     """Применяет идемпотентную схему при старте (CREATE ... IF NOT EXISTS).
+
+    Retry: приватная сеть Railway поднимается через ~1-2 сек после старта контейнера,
+    первое подключение к Postgres может словить DNS-ошибку — ретраим с backoff.
 
     Выполняем по одному стейтменту: asyncpg запрещает несколько команд в одном
     prepared-statement, а dollar-quoting в схеме не используется, поэтому split(';') безопасен.
