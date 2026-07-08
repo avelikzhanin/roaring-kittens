@@ -15,6 +15,12 @@ CREATE TABLE IF NOT EXISTS news_events (
 CREATE INDEX IF NOT EXISTS idx_news_published ON news_events (published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_news_tickers ON news_events USING gin (tickers);
 
+CREATE TABLE IF NOT EXISTS bot_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS usage_log (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     timestamp     TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -10,14 +10,14 @@ HIGH-impact алерты, мультитенантность. См. `docs/superp
 
 ## Команды бота
 
-- `/portfolio` — портфель и P&L
-- `/ask TICKER [вопрос]` — AI-разбор бумаги (напр. `/ask SBER стоит докупать?`)
-- `/digest` — дайджест сейчас
-- `/start` — меню
+- `/ask TICKER [вопрос]` — AI-разбор бумаги (напр. `/ask SBER стоит докупать?`) — **доступно всем** (гости: 10/день)
+- `/portfolio` — портфель и P&L — **только владелец**
+- `/digest` — дайджест сейчас — **только владелец**
+- `/start` — меню; **первый нажавший /start становится владельцем** (бот привязан к его счёту Tinkoff)
 
 ## Архитектура
 
-- **Telegram:** aiogram 3, allow-list по `ADMIN_TELEGRAM_ID`
+- **Telegram:** aiogram 3, открытый доступ; владелец = первый `/start` (или `ADMIN_TELEGRAM_ID`, опционально); личные команды гейтятся по владельцу
 - **Данные:** Tinkoff Invest gRPC SDK (портфель, свечи) + RSS (новости) → PostgreSQL 16 + pgvector
 - **AI:** OpenAI structured outputs, расход пишется в `usage_log`
 - **Universe:** IMOEX (состав через MOEX ISS) с маппингом тикер→FIGI из Tinkoff
@@ -46,8 +46,9 @@ python -m pytest
 
 1. Подключить репо к Railway (Dockerfile определится автоматически)
 2. Добавить Postgres-сервис (image `pgvector/pgvector:pg16`) с volume
-3. Variables app-сервиса: `TELEGRAM_BOT_TOKEN`, `ADMIN_TELEGRAM_ID`, `TINKOFF_TOKEN`
-   (read-only!), `OPENAI_API_KEY`, `FERNET_KEY`, `DATABASE_URL`
+3. Variables app-сервиса: `TELEGRAM_BOT_TOKEN`, `TINKOFF_TOKEN` (read-only!),
+   `OPENAI_API_KEY`, `FERNET_KEY`, `DATABASE_URL`; опционально `ADMIN_TELEGRAM_ID`
+   (фиксирует владельца заранее — иначе владелец = первый `/start`)
 4. Применить схему: `railway run python scripts/apply_schema.py` → `SCHEMA OK`
 
 `FERNET_KEY` сгенерировать: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`

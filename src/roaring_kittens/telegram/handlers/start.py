@@ -2,6 +2,9 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
+from roaring_kittens.db.owner import claim_owner, get_owner_id
+from roaring_kittens.deps import Deps
+
 router = Router()
 
 MAIN_MENU = ReplyKeyboardMarkup(
@@ -13,13 +16,13 @@ MAIN_MENU = ReplyKeyboardMarkup(
 )
 
 HELP_TEXT = (
-    "🐱📈 <b>Roaring Kittens</b> — твой AI-аналитик по Мосбирже.\n\n"
+    "🐱📈 <b>Roaring Kittens</b> — AI-аналитик по Мосбирже.\n\n"
     "<b>Команды:</b>\n"
-    "• <code>/portfolio</code> — портфель и P&amp;L\n"
-    "• <code>/ask ТИКЕР [вопрос]</code> — разбор бумаги\n"
+    "• <code>/ask ТИКЕР [вопрос]</code> — разбор бумаги (доступно всем)\n"
     "   напр. <code>/ask SBER</code> или <code>/ask SBER стоит докупать?</code>\n"
-    "• <code>/digest</code> — сводка сейчас\n\n"
-    "Каждое утро в 9:00 МСК я сам пришлю дайджест по портфелю."
+    "• <code>/portfolio</code> — портфель и P&amp;L (только владелец)\n"
+    "• <code>/digest</code> — сводка по портфелю (только владелец)\n\n"
+    "Владельцу каждое утро в 9:00 МСК приходит дайджест."
 )
 
 ASK_PROMPT = (
@@ -30,11 +33,24 @@ ASK_PROMPT = (
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, deps: Deps) -> None:
+    async with deps.session_factory() as session:
+        just_claimed = await claim_owner(session, message.from_user.id)
+        await session.commit()
+        owner_id = await get_owner_id(session)
+
+    if just_claimed:
+        intro = ("👑 Ты — владелец бота: /portfolio и утренний дайджест "
+                 "привязаны к твоему счёту Tinkoff.")
+    elif owner_id == message.from_user.id:
+        intro = "С возвращением! 👑"
+    else:
+        intro = ("Я открыт для всех: спрашивай про любую бумагу Мосбиржи через /ask.\n"
+                 "Портфель и дайджест доступны только владельцу бота.")
+
     await message.answer(
-        "🐱📈 <b>Roaring Kittens</b>\n\n"
-        "Я твой AI-аналитик по Мосбирже.\n"
-        "Команды: /portfolio /ask /digest /help",
+        f"🐱📈 <b>Roaring Kittens</b>\n\nЯ AI-аналитик по Мосбирже.\n{intro}\n\n"
+        "Команды: /ask /portfolio /digest /help",
         reply_markup=MAIN_MENU,
     )
 

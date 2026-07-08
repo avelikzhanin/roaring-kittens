@@ -1,6 +1,7 @@
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from roaring_kittens.db.owner import fetch_owner_id
 from roaring_kittens.deps import Deps
 from roaring_kittens.digest.morning import run_morning_digest
 from roaring_kittens.news.matching import match_tickers
@@ -28,11 +29,20 @@ async def poll_news(deps: Deps) -> None:
     log.info("news_poll_done", inserted=total_inserted)
 
 
+async def morning_digest_job(deps: Deps, bot) -> None:
+    """Утренний дайджест шлём владельцу (первый /start). Пока владельца нет — скипаем."""
+    owner_id = await fetch_owner_id(deps.session_factory)
+    if owner_id is None:
+        log.warning("digest_skipped_no_owner")
+        return
+    await run_morning_digest(deps, bot, owner_id)
+
+
 def build_scheduler(deps: Deps, bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=deps.settings.tz)
     scheduler.add_job(poll_news, "interval", minutes=30, args=[deps],
                       id="poll_news", max_instances=1, coalesce=True)
-    scheduler.add_job(run_morning_digest, "cron", hour=9, minute=0,
-                      args=[deps, bot, deps.settings.admin_telegram_id],
+    scheduler.add_job(morning_digest_job, "cron", hour=9, minute=0,
+                      args=[deps, bot],
                       id="morning_digest", max_instances=1, coalesce=True)
     return scheduler

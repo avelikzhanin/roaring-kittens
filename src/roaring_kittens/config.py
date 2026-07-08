@@ -4,7 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     telegram_bot_token: str
-    admin_telegram_id: int
+    # Опционально: заранее фиксирует владельца. Если не задан — владельцем
+    # становится первый пользователь, нажавший /start (owner-claim).
+    admin_telegram_id: int | None = None
     tinkoff_token: str
     openai_api_key: str
     database_url: str

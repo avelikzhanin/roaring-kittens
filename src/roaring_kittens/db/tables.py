@@ -15,6 +15,13 @@ news_events = Table(
     Column("url", Text, nullable=False, unique=True),
 )
 
+bot_state = Table(
+    "bot_state", metadata,
+    Column("key", Text, primary_key=True),
+    Column("value", Text, nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+)
+
 usage_log = Table(
     "usage_log", metadata,
     Column("id", UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")),
