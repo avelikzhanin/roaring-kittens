@@ -11,6 +11,8 @@ SYSTEM_PROMPT = """Ты — аналитик российского фондов
 Правила:
 - НЕ выдумывай числа. Все цены и проценты бери из блока «Техника». Если данных нет — так и скажи.
 - Новости оценивай критично: пресс-релизы и пересказы — слабый сигнал.
+- Если дан блок «Позиция» — рассуждай относительно реального входа и веса позиции
+  (докупать/держать/сокращать), а не абстрактно.
 - Это не инвестиционная рекомендация, а аналитический разбор для частного инвестора.
 - Пиши по-русски, кратко и по делу."""
 
@@ -25,13 +27,16 @@ def _format_news(news: list[NewsItem]) -> str:
 
 
 def build_analyst_messages(ticker: str, tech: TechSummary | None,
-                           news: list[NewsItem], question: str | None) -> list[dict]:
+                           news: list[NewsItem], question: str | None,
+                           position_note: str | None = None) -> list[dict]:
     tech_text = tech.as_text() if tech else "Технических данных недостаточно."
     user = (
         f"Тикер: {ticker}\n\n"
         f"Техника:\n{tech_text}\n\n"
         f"Новости (последние):\n{_format_news(news)}\n"
     )
+    if position_note:
+        user += f"\n{position_note}\n"
     if question:
         user += f"\nВопрос пользователя: {question}"
     return [
@@ -41,7 +46,8 @@ def build_analyst_messages(ticker: str, tech: TechSummary | None,
 
 
 async def run_analyst(llm: LLM, ticker: str, tech: TechSummary | None,
-                      news: list[NewsItem], question: str | None) -> AnalystReport:
-    messages = build_analyst_messages(ticker, tech, news, question)
+                      news: list[NewsItem], question: str | None,
+                      position_note: str | None = None) -> AnalystReport:
+    messages = build_analyst_messages(ticker, tech, news, question, position_note)
     return await llm.parse(model=ANALYST_MODEL, operation="analyst",
                            messages=messages, schema=AnalystReport)

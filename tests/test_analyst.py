@@ -22,6 +22,19 @@ def test_messages_contain_data_and_guardrails():
     assert "докупать?" in user
 
 
+def test_messages_include_position_note_when_given():
+    msgs = build_analyst_messages(
+        "SBER", TECH, NEWS, question="докупать?",
+        position_note="Позиция: 500 шт по 280 ₽ (P&L +5.4%), вес 12% портфеля.")
+    user = msgs[1]["content"]
+    assert "500 шт по 280" in user and "вес 12%" in user
+
+
+def test_messages_without_position_have_no_position_block():
+    msgs = build_analyst_messages("SBER", TECH, NEWS, question=None)
+    assert "Позиция" not in msgs[1]["content"]
+
+
 async def test_run_analyst_calls_llm_with_schema():
     fake_llm = AsyncMock()
     fake_llm.parse.return_value = AnalystReport(
