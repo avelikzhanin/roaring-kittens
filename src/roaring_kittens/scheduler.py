@@ -5,6 +5,7 @@ from roaring_kittens.db.owner import fetch_owner_id
 from roaring_kittens.deps import Deps
 from roaring_kittens.digest.morning import run_morning_digest
 from roaring_kittens.news.matching import match_tickers
+from roaring_kittens.scoring import score_due_calls
 from roaring_kittens.news.repository import save_news
 from roaring_kittens.news.rss import fetch_feed
 from roaring_kittens.news.sources import SOURCES
@@ -45,4 +46,6 @@ def build_scheduler(deps: Deps, bot) -> AsyncIOScheduler:
     scheduler.add_job(morning_digest_job, "cron", hour=9, minute=0,
                       args=[deps, bot],
                       id="morning_digest", max_instances=1, coalesce=True)
+    scheduler.add_job(score_due_calls, "cron", hour=23, minute=45, args=[deps],
+                      id="score_calls", max_instances=1, coalesce=True)
     return scheduler
