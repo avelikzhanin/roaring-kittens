@@ -1,10 +1,14 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from roaring_kittens.ai.schemas import AnalystReport
 from roaring_kittens.broker.models import PortfolioSnapshot, Position
+from roaring_kittens.db.calls import ScoredCall
 from roaring_kittens.news.models import NewsItem
-from roaring_kittens.telegram.formatting import format_analyst_report, format_portfolio
+from roaring_kittens.scoring import TrackStats
+from roaring_kittens.telegram.formatting import (
+    format_analyst_report, format_portfolio, format_prev_call_note, format_track,
+)
 
 
 def _pos(ticker, qty, avg, cur, pnl):
@@ -68,3 +72,55 @@ def test_format_analyst_report_renders_clickable_sources():
     text = format_analyst_report(r, sources=src)
     assert '<a href="https://x/1">Заголовок</a>' in text
     assert "Источники" in text
+
+
+_NOW = datetime.now(tz=timezone.utc)
+
+
+def test_prev_call_note_same_stance():
+    note = format_prev_call_note("neutral", 0.6, _NOW - timedelta(days=3), "neutral", _NOW)
+    assert "3 дн" in note and "⚪️" in note and "изменилось" not in note
+
+
+def test_prev_call_note_flags_stance_flip():
+    note = format_prev_call_note("bullish", 0.7, _NOW - timedelta(days=2), "bearish", _NOW)
+    assert "🟢" in note and "мнение изменилось" in note
+
+
+def test_format_analyst_report_includes_prev_note():
+    r = AnalystReport(ticker="SBER", stance="bullish", summary="s",
+                      key_points=["k"], risks=["r"], confidence=0.7)
+    text = format_analyst_report(r, prev_note="🕰 Прошлый разбор (сегодня): ⚪️ neutral 60%")
+    assert "Прошлый разбор" in text
+
+
+def test_format_track_shows_hitrate_baseline_and_misses():
+    worst = [ScoredCall(ticker="SBER", stance="bullish",
+                        created_at=datetime(2026, 6, 12, tzinfo=timezone.utc), source="ask",
+                        horizon_days=20, stock_return_pct=Decimal("-8.3"),
+                        imoex_return_pct=Decimal("1.0"), verdict="miss")]
+    stats = TrackStats(primary_horizon=20, total_scored=10,
+                       by_stance={"bullish": (4, 7), "neutral": (2, 3)},
+                       avg_excess_pp=Decimal("1.8"), imoex_up_windows=6,
+                       worst=worst, per_horizon={5: (5, 8), 20: (6, 10)})
+    text = format_track(stats, unscored=4)
+    assert "4/7" in text and "+1.8" in text
+    assert "60%" in text                     # бейзлайн: 6/10 окон IMOEX рос
+    assert "SBER" in text and "−9.3" in text  # excess промаха (−8.3−1.0), знак честный
+    assert "единой оценки: 4" in text
+
+
+def test_format_track_empty():
+    stats = TrackStats(primary_horizon=20, total_scored=0, by_stance={},
+                       avg_excess_pp=Decimal("0"), imoex_up_windows=0)
+    assert "пока нет" in format_track(stats, unscored=2).lower()
+
+
+def test_format_track_shows_horizons_while_primary_matures():
+    # 5-дневные оценки уже есть, 20-дневное окно ещё не дозрело — НЕ «пока нет»
+    stats = TrackStats(primary_horizon=20, total_scored=0, by_stance={},
+                       avg_excess_pp=Decimal("0"), imoex_up_windows=0,
+                       per_horizon={5: (3, 4)})
+    text = format_track(stats, unscored=1)
+    assert "5д: 3/4" in text and "зреет" in text.lower()
+    assert "пока нет" not in text.lower()
