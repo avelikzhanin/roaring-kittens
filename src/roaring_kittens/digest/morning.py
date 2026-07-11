@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from roaring_kittens.ai.analyst import run_analyst
 from roaring_kittens.broker.models import PortfolioSnapshot, Position
 from roaring_kittens.broker.tech import compute_tech_summary
+from roaring_kittens.db.calls import save_call
 from roaring_kittens.deps import Deps
 from roaring_kittens.news.models import NewsItem
 from roaring_kittens.news.repository import get_news_for_tickers
@@ -42,7 +43,7 @@ def build_digest_text(snap: PortfolioSnapshot, news_by_ticker: dict[str, list[Ne
     return "\n".join(parts)
 
 
-async def build_spotlight(deps: Deps, position: Position) -> str | None:
+async def build_spotlight(deps: Deps, position: Position, asked_by: int) -> str | None:
     """Разбор дня для тихого утра (нет новостей) — переиспользует одиночный аналитик."""
     try:
         candles = await deps.broker.get_daily_candles(position.figi)
@@ -51,6 +52,17 @@ async def build_spotlight(deps: Deps, position: Position) -> str | None:
     except Exception as exc:
         log.error("spotlight_failed", ticker=position.ticker, error=str(exc))
         return None
+    try:  # запись вызова не должна ронять дайджест
+        async with deps.session_factory() as session:
+            await save_call(session, asked_by=asked_by, ticker=position.ticker,
+                            figi=position.figi, source="spotlight", question=None,
+                            stance=report.stance, confidence=report.confidence,
+                            summary=report.summary,
+                            price_at_call=tech.last_close if tech else None,
+                            news_urls=[])
+            await session.commit()
+    except Exception as exc:
+        log.error("save_call_failed", ticker=position.ticker, error=str(exc))
     emoji = STANCE_EMOJI.get(report.stance, "")
     return f"🔎 <b>Разбор дня — {position.ticker}</b> {emoji}\n{report.summary}"
 
@@ -90,7 +102,7 @@ async def run_morning_digest(deps: Deps, bot, chat_id: int) -> None:
     # Тихое утро: новостей нет, но дайджест не должен быть пустым — даём разбор дня по ротации.
     if not news_by_ticker and snap.positions:
         idx = datetime.now(tz=timezone.utc).timetuple().tm_yday % len(snap.positions)
-        spotlight = await build_spotlight(deps, snap.positions[idx])
+        spotlight = await build_spotlight(deps, snap.positions[idx], asked_by=chat_id)
         if spotlight:
             text += "\n\n" + spotlight
 
