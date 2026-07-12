@@ -4,7 +4,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from tinkoff.invest import AsyncClient, CandleInterval
 from tinkoff.invest.utils import money_to_decimal, now, quotation_to_decimal
 
-from roaring_kittens.broker.models import Candle, PortfolioSnapshot, Position
+from roaring_kittens.broker.models import Candle, DividendItem, PortfolioSnapshot, Position
 from roaring_kittens.utils.retry import retry_async
 
 
@@ -63,6 +63,26 @@ class TinkoffBroker:
                     volume=c.volume,
                 )
                 for c in resp.candles if c.is_complete
+            ]
+
+    @retry_async(attempts=3, base_delay=1.0)
+    async def get_dividends(self, figi: str, years_back: int = 3) -> list[DividendItem]:
+        async with AsyncClient(self._token) as client:
+            resp = await client.instruments.get_dividends(
+                figi=figi,
+                from_=now() - timedelta(days=365 * years_back),
+                to=now() + timedelta(days=365),  # включая объявленные будущие
+            )
+            return [
+                DividendItem(
+                    # SDK превращает незаданный protobuf-Timestamp в epoch(1970) —
+                    # None он не бывает никогда, поэтому фильтруем по году.
+                    payment_date=(d.payment_date.date()
+                                  if d.payment_date and d.payment_date.year > 1970
+                                  else None),
+                    amount=money_to_decimal(d.dividend_net),
+                )
+                for d in resp.dividends
             ]
 
     async def list_shares(self) -> dict[str, tuple[str, str]]:

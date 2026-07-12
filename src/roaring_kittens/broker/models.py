@@ -21,6 +21,12 @@ class PortfolioSnapshot:
 
 
 @dataclass(frozen=True)
+class DividendItem:
+    payment_date: date | None
+    amount: Decimal
+
+
+@dataclass(frozen=True)
 class Candle:
     day: date
     open: Decimal
