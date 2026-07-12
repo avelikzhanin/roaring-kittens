@@ -125,7 +125,8 @@ def test_moving_averages_and_volume_ratio():
     ind = compute_indicators(_candles(closes, volumes))
     assert ind.ma20 == Decimal("102.5")          # (15*100 + 5*110)/20
     assert ind.ma50 == Decimal("101.0")          # (45*100 + 5*110)/50
-    assert ind.volume_ratio == Decimal("3.0")    # 3000 / средн.30д=1000... см. реализацию
+    # long_avg по 30 последним = (25*1000 + 5*3000)/30 = 1333.33; 3000/1333.33 = 2.25 -> 2.3
+    assert ind.volume_ratio == Decimal("2.3")
 
 
 def test_insufficient_data_gives_nones():
@@ -204,8 +205,6 @@ def compute_indicators(candles: list[Candle]) -> Indicators:
     return Indicators(rsi14=rsi, ma20=ma20, ma50=ma50, volume_ratio=vol_ratio)
 ```
 
-Примечание к тесту volume_ratio: long_avg по последним 30 свечам = (25×1000 + 5×3000)/30 = 1333.33; short = 3000 → 2.3. Скорректировать assert в тесте: `assert ind.volume_ratio == Decimal("2.3")`.
-
 - [ ] **Step 3: Commit**
 
 ```bash
@@ -240,22 +239,30 @@ def test_no_dividends():
     assert "не выплачивались" in text
 
 
-def test_summary_with_yield():
+def test_summary_with_yield_excludes_future_from_12m_sum():
     items = [
         DividendItem(payment_date=date(2025, 12, 10), amount=Decimal("15")),
         DividendItem(payment_date=date(2026, 6, 20), amount=Decimal("18")),
-        DividendItem(payment_date=date(2023, 5, 1), amount=Decimal("10")),  # старше 12 мес
+        DividendItem(payment_date=date(2026, 9, 20), amount=Decimal("20")),  # ОБЪЯВЛЕН, будущее
+        DividendItem(payment_date=date(2023, 5, 1), amount=Decimal("10")),   # старше 12 мес
     ]
     text = format_dividend_summary(items, last_close=Decimal("300"), today=TODAY)
     assert "18 ₽" in text and "15 ₽" in text
-    # за 12 мес: 15+18=33; доходность 33/300*100 = 11.0%
+    # за 12 мес ВЫПЛАЧЕНО: 15+18=33 (будущие 20 ₽ не считаются); 33/300*100 = 11.0%
     assert "33" in text and "11.0%" in text
+    assert "Объявлено" in text and "20 ₽" in text  # будущая выплата показана отдельно
 
 
 def test_summary_without_price_skips_yield():
     items = [DividendItem(payment_date=date(2026, 6, 20), amount=Decimal("18"))]
     text = format_dividend_summary(items, last_close=None, today=TODAY)
     assert "%" not in text
+
+
+def test_only_announced_future_dividend():
+    items = [DividendItem(payment_date=date(2026, 9, 20), amount=Decimal("20"))]
+    text = format_dividend_summary(items, last_close=Decimal("300"), today=TODAY)
+    assert "Объявлено" in text and "не выплачивались" not in text
 ```
 
 - [ ] **Step 2: Реализовать**
@@ -282,21 +289,27 @@ from roaring_kittens.broker.models import DividendItem
 
 def format_dividend_summary(items: list[DividendItem], last_close: Decimal | None,
                             today: date) -> str:
-    paid = sorted([i for i in items if i.payment_date is not None],
-                  key=lambda i: i.payment_date)
-    if not paid:
+    dated = sorted([i for i in items if i.payment_date is not None],
+                   key=lambda i: i.payment_date)
+    paid = [i for i in dated if i.payment_date <= today]
+    announced = [i for i in dated if i.payment_date > today]
+    if not dated:
         return "Дивиденды за последние 3 года не выплачивались (или данных нет)."
-    lines = ["Дивиденды (последние выплаты):"]
-    for i in paid[-4:]:
-        lines.append(f"- {i.payment_date:%d.%m.%Y}: {i.amount} ₽")
-    year_ago = today - timedelta(days=365)
-    last12 = sum((i.amount for i in paid if i.payment_date >= year_ago), Decimal("0"))
-    if last12 > 0:
-        line = f"Сумма за 12 мес: {last12} ₽"
-        if last_close:
-            y = (last12 / last_close * 100).quantize(Decimal("0.1"), ROUND_HALF_UP)
-            line += f" (~{y}% доходности к текущей цене)"
-        lines.append(line)
+    lines: list[str] = []
+    if paid:
+        lines.append("Дивиденды (последние выплаты):")
+        for i in paid[-4:]:
+            lines.append(f"- {i.payment_date:%d.%m.%Y}: {i.amount} ₽")
+        year_ago = today - timedelta(days=365)
+        last12 = sum((i.amount for i in paid if i.payment_date >= year_ago), Decimal("0"))
+        if last12 > 0:
+            line = f"Сумма за 12 мес: {last12} ₽"
+            if last_close:
+                y = (last12 / last_close * 100).quantize(Decimal("0.1"), ROUND_HALF_UP)
+                line += f" (~{y}% доходности к текущей цене)"
+            lines.append(line)
+    for i in announced:
+        lines.append(f"Объявлено (ещё не выплачено): {i.payment_date:%d.%m.%Y}: {i.amount} ₽")
     return "\n".join(lines)
 ```
 
@@ -313,7 +326,11 @@ def format_dividend_summary(items: list[DividendItem], last_close: Decimal | Non
             )
             return [
                 DividendItem(
-                    payment_date=d.payment_date.date() if d.payment_date else None,
+                    # SDK превращает незаданный protobuf-Timestamp в epoch(1970) —
+                    # None он не бывает никогда, поэтому фильтруем по году.
+                    payment_date=(d.payment_date.date()
+                                  if d.payment_date and d.payment_date.year > 1970
+                                  else None),
                     amount=money_to_decimal(d.dividend_net),
                 )
                 for d in resp.dividends
@@ -482,7 +499,27 @@ git commit -m "feat: committee pydantic schemas"
 
 **Files:**
 - Create: `src/roaring_kittens/committee/context.py`
+- Modify: `tests/conftest.py` (общая фикстура `council_ctx` — НЕ импортировать между тест-модулями: tests/ не пакет, `from tests.test_X import ...` ломается вне `python -m pytest`)
 - Test: `tests/test_council_context.py`
+
+- [ ] **Step 0: Фикстура в tests/conftest.py (в конец файла)**
+
+```python
+@pytest.fixture
+def council_ctx():
+    """Минимальный контекст комитета: тонкие данные, пустой счёт, гость."""
+    from decimal import Decimal
+
+    from roaring_kittens.broker.tech import Indicators
+    from roaring_kittens.committee.context import CouncilContext
+
+    return CouncilContext(
+        ticker="SBER", tech=None,
+        indicators=Indicators(rsi14=Decimal("43.2"), ma20=None, ma50=None,
+                              volume_ratio=None),
+        news_facts=[], crowd_posts=[], dividend_summary="Дивиденды: нет данных.",
+        position_note=None, position_weight_pct=None, prev_call_note=None)
+```
 
 - [ ] **Step 1: Падающий тест (monkeypatch модульных зависимостей)**
 
@@ -655,20 +692,8 @@ git commit -m "feat: council context assembly (tech+indicators, news split, divi
 
 ```python
 # tests/test_specialists.py
-from datetime import date
-from decimal import Decimal
-from types import SimpleNamespace
-
-from roaring_kittens.broker.tech import Indicators
-from roaring_kittens.committee.context import CouncilContext
 from roaring_kittens.committee.schemas import SpecialistView
 from roaring_kittens.committee.specialists import ROLE_PROMPTS, build_specialist_user, run_specialists
-
-CTX = CouncilContext(
-    ticker="SBER", tech=None,
-    indicators=Indicators(rsi14=Decimal("43.2"), ma20=None, ma50=None, volume_ratio=None),
-    news_facts=[], crowd_posts=[], dividend_summary="Дивиденды: нет данных.",
-    position_note=None, position_weight_pct=None, prev_call_note=None)
 
 
 class FakeLLM:
@@ -681,19 +706,19 @@ class FakeLLM:
                               key_points=["k"], confidence=0.5)
 
 
-async def test_runs_all_four_roles_and_fixes_role_field():
+async def test_runs_all_four_roles_and_fixes_role_field(council_ctx):
     llm = FakeLLM()
-    views = await run_specialists(llm, CTX)
+    views = await run_specialists(llm, council_ctx)
     assert sorted(v.role for v in views) == ["fundamentals", "news", "sentiment", "technical"]
     assert sorted(llm.ops) == ["council_fundamentals", "council_news",
                                "council_sentiment", "council_technical"]
 
 
-def test_each_role_gets_its_data_slice():
-    assert "RSI(14): 43.2" in build_specialist_user(CTX, "technical")
-    assert "Дивиденды" in build_specialist_user(CTX, "fundamentals")
-    assert "новостей нет" in build_specialist_user(CTX, "news").lower()
-    assert "постов нет" in build_specialist_user(CTX, "sentiment").lower()
+def test_each_role_gets_its_data_slice(council_ctx):
+    assert "RSI(14): 43.2" in build_specialist_user(council_ctx, "technical")
+    assert "Дивиденды" in build_specialist_user(council_ctx, "fundamentals")
+    assert "новостей нет" in build_specialist_user(council_ctx, "news").lower()
+    assert "постов нет" in build_specialist_user(council_ctx, "sentiment").lower()
 ```
 
 - [ ] **Step 2: Реализовать**
@@ -772,7 +797,6 @@ git commit -m "feat: four parallel committee specialists with per-role data slic
 # tests/test_debate.py
 from roaring_kittens.committee.debate import build_debate_user, is_converged, run_debate_turn
 from roaring_kittens.committee.schemas import DebateTurn, SpecialistView
-from tests.test_specialists import CTX  # переиспользуем фикстуру контекста
 
 VIEWS = [SpecialistView(role="news", stance="neutral", summary="s",
                         key_points=["k"], confidence=0.5)]
@@ -789,8 +813,8 @@ def test_convergence_when_positions_match():
     assert is_converged([_turn("bull", "bullish")]) is False  # bear ещё не ходил
 
 
-def test_debate_user_contains_views_and_history():
-    text = build_debate_user(CTX, VIEWS, [_turn("bull", "bullish")], "bear")
+def test_debate_user_contains_views_and_history(council_ctx):
+    text = build_debate_user(council_ctx, VIEWS, [_turn("bull", "bullish")], "bear")
     assert "news" in text and "БЫК" in text.upper()
 
 
@@ -803,9 +827,9 @@ class FakeLLM:
         return DebateTurn(argument="a", rebuttal_of="-", position_after="bullish")
 
 
-async def test_turn_uses_o4_mini_and_role_op():
+async def test_turn_uses_o4_mini_and_role_op(council_ctx):
     llm = FakeLLM()
-    turn = await run_debate_turn(llm, CTX, VIEWS, [], "bull")
+    turn = await run_debate_turn(llm, council_ctx, VIEWS, [], "bull")
     assert turn.position_after == "bullish"
     assert llm.ops == [("council_debate_bull", "o4-mini")]
 ```
@@ -894,7 +918,6 @@ from decimal import Decimal
 from roaring_kittens.committee.manager import run_manager
 from roaring_kittens.committee.risk import hard_checks, run_risk
 from roaring_kittens.committee.schemas import Proposal, RiskReview, SpecialistView
-from tests.test_specialists import CTX
 
 VIEWS = [SpecialistView(role="news", stance="neutral", summary="s",
                         key_points=["k"], confidence=0.5)]
@@ -902,23 +925,25 @@ PROPOSAL = Proposal(action="buy", stance="bullish", rationale="r", thesis="t",
                     invalidation="цена ниже 250", confidence=0.7)
 
 
-def test_hard_checks_concentration_veto():
-    fat = replace(CTX, position_weight_pct=Decimal("16"))
+def test_hard_checks_concentration_veto(council_ctx):
+    fat = replace(council_ctx, position_weight_pct=Decimal("16"))
     vetoes = hard_checks(fat, PROPOSAL)
     assert any("Концентрация" in v for v in vetoes)
-    # sell при большой позиции — не вето
-    assert hard_checks(fat, PROPOSAL.model_copy(update={"action": "sell"})) == []
+    # sell при большой позиции — концентрационного вето нет; берём confidence<=0.6,
+    # чтобы не сработало И overconfidence-вето (ctx.tech is None). Оно намеренно
+    # применяется к ЛЮБОМУ action — переуверенный sell так же вреден.
+    sell = PROPOSAL.model_copy(update={"action": "sell", "confidence": 0.5})
+    assert hard_checks(fat, sell) == []
 
 
-def test_hard_checks_overconfidence_on_thin_data():
-    thin = replace(CTX, tech=None)  # CTX.tech и так None, но явно
-    vetoes = hard_checks(thin, PROPOSAL)  # confidence 0.7 > 0.6, техники нет
+def test_hard_checks_overconfidence_on_thin_data(council_ctx):
+    vetoes = hard_checks(council_ctx, PROPOSAL)  # tech None, confidence 0.7 > 0.6
     assert any("тонких данных" in v for v in vetoes)
 
 
-def test_hard_checks_empty_account_no_weight_veto():
+def test_hard_checks_empty_account_no_weight_veto(council_ctx):
     assert not any("Концентрация" in v
-                   for v in hard_checks(CTX, PROPOSAL))  # weight None -> пропуск
+                   for v in hard_checks(council_ctx, PROPOSAL))  # weight None -> пропуск
 
 
 class FakeLLM:
@@ -931,23 +956,23 @@ class FakeLLM:
         return self.result
 
 
-async def test_manager_op_and_model():
+async def test_manager_op_and_model(council_ctx):
     llm = FakeLLM(PROPOSAL)
-    p = await run_manager(llm, CTX, VIEWS, [])
+    p = await run_manager(llm, council_ctx, VIEWS, [])
     assert p.action == "buy"
     assert llm.ops == [("council_manager", "gpt-4o")]
 
 
-async def test_risk_hard_veto_overrides_llm_approval():
+async def test_risk_hard_veto_overrides_llm_approval(council_ctx):
     llm = FakeLLM(RiskReview(approved=True, veto_reason=None, notes=["ok"]))
-    review = await run_risk(llm, CTX, PROPOSAL, vetoes=["Концентрация: 16%"])
+    review = await run_risk(llm, council_ctx, PROPOSAL, vetoes=["Концентрация: 16%"])
     assert review.approved is False and "Концентрация" in review.veto_reason
     assert llm.ops[0] == ("council_risk", "o4-mini")
 
 
-async def test_risk_llm_veto_respected():
+async def test_risk_llm_veto_respected(council_ctx):
     llm = FakeLLM(RiskReview(approved=False, veto_reason="волатильность", notes=[]))
-    review = await run_risk(llm, CTX, PROPOSAL, vetoes=[])
+    review = await run_risk(llm, council_ctx, PROPOSAL, vetoes=[])
     assert review.approved is False and review.veto_reason == "волатильность"
 ```
 
@@ -1075,7 +1100,6 @@ git commit -m "feat: portfolio manager and risk manager with deterministic hard 
 # tests/test_council_graph.py
 from roaring_kittens.committee.graph import build_council_graph
 from roaring_kittens.committee.schemas import DebateTurn, Proposal, RiskReview, SpecialistView
-from tests.test_specialists import CTX
 
 
 class ScriptedLLM:
@@ -1102,10 +1126,10 @@ class ScriptedLLM:
                               key_points=["k"], confidence=0.5)
 
 
-async def test_graph_runs_end_to_end_with_early_convergence():
+async def test_graph_runs_end_to_end_with_early_convergence(council_ctx):
     llm = ScriptedLLM()
     graph = build_council_graph(llm)
-    state = await graph.ainvoke({"ctx": CTX})
+    state = await graph.ainvoke({"ctx": council_ctx})
     assert state["proposal"].action == "wait"
     assert state["risk"].approved is True
     assert len(state["views"]) == 4
@@ -1346,6 +1370,12 @@ def test_protocol_chunks_under_limit():
 def test_chunk_lines_splits():
     chunks = chunk_lines(["x" * 100] * 50, limit=1000)
     assert len(chunks) > 1 and all(len(c) <= 1000 for c in chunks)
+
+
+def test_chunk_lines_hard_splits_single_overlong_line():
+    chunks = chunk_lines(["x" * 5000], limit=1000)
+    assert all(len(c) <= 1000 for c in chunks)
+    assert sum(len(c) for c in chunks) == 5000
 ```
 
 - [ ] **Step 2: Реализовать**
@@ -1405,12 +1435,20 @@ def format_council_protocol(views: list[SpecialistView], debate: list[dict],
 
 def chunk_lines(lines: list[str], limit: int = 3500) -> list[str]:
     chunks, cur = [], ""
-    for line in lines:
-        if cur and len(cur) + len(line) + 1 > limit:
+
+    def push(segment: str) -> None:
+        nonlocal cur
+        if cur and len(cur) + len(segment) + 1 > limit:
             chunks.append(cur)
-            cur = line
+            cur = segment
         else:
-            cur = f"{cur}\n{line}" if cur else line
+            cur = f"{cur}\n{segment}" if cur else segment
+
+    for line in lines:
+        while len(line) > limit:  # одна сверхдлинная строка не должна пробить лимит TG
+            push(line[:limit])
+            line = line[limit:]
+        push(line)
     if cur:
         chunks.append(cur)
     return chunks
@@ -1456,13 +1494,19 @@ router = Router()
 
 USAGE = "Формат: <code>/council SBER</code> — полный разбор комитетом (4 аналитика + дебаты)."
 
-STAGE_TEXT = {
-    "specialists": "🏛 {t}: четыре аналитика изучают данные…",
-    "bull": "🐂 {t}: бык выступает…",
-    "bear": "🐻 {t}: медведь возражает…",
-    "manager": "👔 {t}: Portfolio Manager принимает решение…",
-    "risk": "🛡 {t}: Risk Manager проверяет…",
-}
+
+def _next_stage_text(node: str, state: dict, ticker: str) -> str | None:
+    """astream(stream_mode='updates') стреляет ПОСЛЕ узла — анонсируем СЛЕДУЮЩУЮ стадию."""
+    from roaring_kittens.committee.debate import MAX_ROUNDS, is_converged
+    if node == "specialists":
+        return f"⚔️ {ticker}: аналитики высказались — дебаты Bull vs Bear…"
+    if node == "bear":
+        if state["round"] >= MAX_ROUNDS or is_converged(state["debate"]):
+            return f"👔 {ticker}: дебаты завершены — Portfolio Manager взвешивает…"
+        return f"⚔️ {ticker}: дебаты, раунд {state['round'] + 1}…"
+    if node == "manager":
+        return f"🛡 {ticker}: Risk Manager проверяет…"
+    return None
 
 
 @router.message(Command("council"))
@@ -1480,7 +1524,8 @@ async def cmd_council(message: Message, command: CommandObject, deps: Deps) -> N
         await message.answer(f"Не знаю бумагу «{command.args.split()[0]}». {USAGE}")
         return
 
-    progress = await message.answer(f"🏛 Собираю комитет по {instrument.ticker}…")
+    progress = await message.answer(
+        f"🏛 Собираю комитет по {instrument.ticker}… (4 аналитика изучают данные)")
     try:
         ctx = await build_council_context(deps, instrument, message.from_user.id,
                                           today=date.today())
@@ -1489,10 +1534,10 @@ async def cmd_council(message: Message, command: CommandObject, deps: Deps) -> N
         async for chunk in graph.astream(state, stream_mode="updates"):
             for node, update in chunk.items():
                 state.update(update)
-                stage = STAGE_TEXT.get(node)
+                stage = _next_stage_text(node, state, instrument.ticker)
                 if stage:
                     try:
-                        await progress.edit_text(stage.format(t=instrument.ticker))
+                        await progress.edit_text(stage)
                     except Exception:  # too-fast identical edits — не критично
                         pass
         proposal, risk = state["proposal"], state["risk"]
@@ -1506,13 +1551,16 @@ async def cmd_council(message: Message, command: CommandObject, deps: Deps) -> N
     call_id = run_id = None
     try:  # персист не должен ронять ответ
         async with deps.session_factory() as session:
-            call_id = await save_call(
-                session, asked_by=message.from_user.id, ticker=instrument.ticker,
-                figi=instrument.figi, source="council", question=None,
-                stance=proposal.stance, confidence=proposal.confidence,
-                summary=proposal.rationale,
-                price_at_call=ctx.tech.last_close if ctx.tech else None,
-                news_urls=[n.url for n in ctx.news_facts + ctx.crowd_posts])
+            # Вето Risk = комитет НЕ дал рекомендацию → в track-record не пишем
+            # (иначе заблокированная идея скорилась бы как реальная ставка).
+            if risk.approved:
+                call_id = await save_call(
+                    session, asked_by=message.from_user.id, ticker=instrument.ticker,
+                    figi=instrument.figi, source="council", question=None,
+                    stance=proposal.stance, confidence=proposal.confidence,
+                    summary=proposal.rationale,
+                    price_at_call=ctx.tech.last_close if ctx.tech else None,
+                    news_urls=[n.url for n in ctx.news_facts + ctx.crowd_posts])
             transcript = {
                 "views": [v.model_dump() for v in state["views"]],
                 "debate": state["debate"],
@@ -1538,8 +1586,18 @@ async def cmd_council(message: Message, command: CommandObject, deps: Deps) -> N
 
 @router.callback_query(F.data.startswith("proto:"))
 async def cb_protocol(callback: CallbackQuery, deps: Deps) -> None:
+    # Owner-гейт обязателен: в транскрипте (rationale/дебаты) может фигурировать
+    # позиция владельца — гостям это видеть нельзя.
+    owner_id = await fetch_owner_id(deps.session_factory)
+    if callback.from_user.id != owner_id:
+        await callback.answer("Протокол доступен только владельцу", show_alert=True)
+        return
     await callback.answer()
-    run_id = UUID(callback.data.split(":", 1)[1])
+    try:
+        run_id = UUID(callback.data.split(":", 1)[1])
+    except ValueError:
+        await callback.message.answer("Протокол не найден.")
+        return
     async with deps.session_factory() as session:
         transcript = await get_council_transcript(session, run_id)
     if transcript is None:
@@ -1602,10 +1660,11 @@ railway up --service app --ci
 
 - [ ] **Step 3: MANUAL — E2E-чеклист (владелец)**
 
-- [ ] `/council SBER` → прогресс меняется по стадиям (аналитики → бык → медведь → PM → Risk) → вердикт с голосами и тезисом за 60–120 сек
-- [ ] Кнопка «📜 Протокол» → полный протокол (мнения 4 ролей + ходы дебатов)
-- [ ] `/track` → появился вызов source=council (после ночного скоринга войдёт в hit-rate)
-- [ ] Гость: `/council SBER` → вежливый отказ с подсказкой /ask
+- [ ] `/council SBER` → прогресс меняется по стадиям (аналитики → дебаты → PM → Risk) → вердикт с голосами и тезисом за 60–120 сек
+- [ ] Кнопка «📜 Протокол» (владелец) → полный протокол (мнения 4 ролей + ходы дебатов)
+- [ ] `/track` → счётчик «Без единой оценки» вырос на 1 (одобренный вердикт попал в calls; проверка: `SELECT count(*) FROM calls WHERE source='council'` через psql на Railway)
+- [ ] Вето Risk (если случится): вердикт показан с ⛔️, счётчик «Без единой оценки» НЕ вырос (вето не пишется в track-record)
+- [ ] Гость: `/council SBER` → вежливый отказ с подсказкой /ask; тап по чужой кнопке «📜 Протокол» → alert «только владельцу»
 - [ ] `/council XXXX` → «не знаю бумагу»
 - [ ] В `usage_log`: операции council_news/technical/fundamentals/sentiment/debate_*/manager/risk; суммарная стоимость прогона <$0.50
 - [ ] Пустой счёт: вердикт в «режиме идей», Risk не вето-ит по концентрации
@@ -1617,6 +1676,17 @@ git add README.md && git commit -m "docs: phase 2 committee README" && git tag p
 ```
 
 ---
+
+## Adversarial review (2026-07-12, мультиагентный: 3 ревьюера × верификация)
+
+20 сырых находок → 13 подтверждено → 10 уникальных дефектов исправлено в этой версии:
+owner-гейт на кнопку протокола (blocker: утечка позиции гостям); вето-вердикты не пишутся
+в calls (blocker: скорились бы как реальные ставки); фикстура council_ctx в conftest вместо
+кросс-импорта тест-модулей (major); epoch-1970 у Tinkoff Dividend.payment_date → фильтр по
+году (major); будущие дивиденды исключены из 12-мес суммы, показываются как «Объявлено»
+(major); тест sell-кейса без ложного overconfidence-вето (blocker в тесте); volume_ratio
+2.3 сразу в теле теста (minor); стадии прогресса анонсируют СЛЕДУЮЩИЙ шаг (minor);
+chunk_lines рубит сверхдлинные строки (minor); E2E-чеклист проверяемый + вето-кейс (minor).
 
 ## Self-review checklist (выполнен при написании)
 
