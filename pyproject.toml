@@ -22,6 +22,7 @@ dependencies = [
     "feedparser>=6.0",
     "cryptography>=42",
     "structlog>=24",
+    "langgraph>=0.2",
 ]
 
 [project.optional-dependencies]
