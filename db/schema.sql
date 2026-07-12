@@ -41,6 +41,15 @@ CREATE TABLE IF NOT EXISTS call_scores (
     PRIMARY KEY (call_id, horizon_days)
 );
 
+CREATE TABLE IF NOT EXISTS council_runs (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ticker     VARCHAR(20) NOT NULL,
+    asked_by   BIGINT NOT NULL,
+    transcript JSONB NOT NULL,
+    call_id    UUID REFERENCES calls(id)
+);
+
 CREATE TABLE IF NOT EXISTS bot_state (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,

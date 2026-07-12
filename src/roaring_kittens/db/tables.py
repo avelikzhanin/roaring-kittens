@@ -1,6 +1,6 @@
 from sqlalchemy import (BigInteger, TIMESTAMP, Column, Float, ForeignKey, Integer,
                         MetaData, Numeric, String, Table, Text, text)
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 
 metadata = MetaData()
 
@@ -40,6 +40,16 @@ news_events = Table(
     Column("headline", Text, nullable=False),
     Column("body", Text),
     Column("url", Text, nullable=False, unique=True),
+)
+
+council_runs = Table(
+    "council_runs", metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    Column("ticker", String(20), nullable=False),
+    Column("asked_by", BigInteger, nullable=False),
+    Column("transcript", JSONB, nullable=False),
+    Column("call_id", UUID(as_uuid=True), ForeignKey("calls.id")),
 )
 
 bot_state = Table(
