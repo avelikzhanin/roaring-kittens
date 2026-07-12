@@ -1,6 +1,5 @@
 import random
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 
 import structlog
 from aiogram import F, Router
@@ -8,6 +7,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from roaring_kittens.ai.analyst import run_analyst
+from roaring_kittens.broker.position_note import position_note_from_snapshot
 from roaring_kittens.broker.tech import compute_tech_summary
 from roaring_kittens.db.calls import get_last_call, save_call
 from roaring_kittens.db.owner import fetch_owner_id
@@ -77,13 +77,7 @@ async def build_position_note(deps: Deps, ticker: str) -> str | None:
     except Exception as exc:
         log.warning("position_note_failed", error=str(exc))
         return None
-    pos = next((p for p in snap.positions if p.ticker == ticker), None)
-    if pos is None:
-        return "Позиция: у пользователя НЕТ этой бумаги в портфеле."
-    weight = (pos.quantity * pos.current_price / snap.total_value * 100).quantize(Decimal("0.1")) \
-        if snap.total_value else Decimal("0")
-    return (f"Позиция: {pos.quantity} шт по {pos.avg_price} ₽ "
-            f"(P&L {pos.pnl_pct:+}%), вес {weight}% портфеля.")
+    return position_note_from_snapshot(snap, ticker)
 
 
 async def _analyze_and_edit(progress: Message, deps: Deps, instrument: Instrument,
