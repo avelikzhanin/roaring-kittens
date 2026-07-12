@@ -22,3 +22,19 @@ async def db_session_factory():
     engine = create_async_engine(TEST_DB)
     yield async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
+
+
+@pytest.fixture
+def council_ctx():
+    """Минимальный контекст комитета: тонкие данные, пустой счёт, гость."""
+    from decimal import Decimal
+
+    from roaring_kittens.broker.tech import Indicators
+    from roaring_kittens.committee.context import CouncilContext
+
+    return CouncilContext(
+        ticker="SBER", tech=None,
+        indicators=Indicators(rsi14=Decimal("43.2"), ma20=None, ma50=None,
+                              volume_ratio=None),
+        news_facts=[], crowd_posts=[], dividend_summary="Дивиденды: нет данных.",
+        position_note=None, position_weight_pct=None, prev_call_note=None)
