@@ -1,5 +1,5 @@
 from roaring_kittens.committee.schemas import Proposal, RiskReview, SpecialistView
-from roaring_kittens.telegram.formatting import STANCE_EMOJI
+from roaring_kittens.telegram.formatting import STANCE_EMOJI, esc
 
 ACTION_RU = {"buy": "покупать", "sell": "продавать", "hold": "держать", "wait": "ждать"}
 ROLE_ICON = {"news": "📰", "technical": "📈", "fundamentals": "💰", "sentiment": "🗣"}
@@ -10,16 +10,16 @@ def format_council_verdict(ticker: str, views: list[SpecialistView], debate: lis
     rounds = sum(1 for t in debate if t["speaker"] == "bear")
     votes = " · ".join(f"{ROLE_ICON[v.role]} {STANCE_EMOJI[v.stance]}" for v in views)
     risk_line = "🛡 Risk: ✅ одобрено" if risk.approved \
-        else f"🛡 Risk: ⛔️ ВЕТО — {risk.veto_reason}"
+        else f"🛡 Risk: ⛔️ ВЕТО — {esc(risk.veto_reason)}"
     lines = [
         f"🏛 <b>Комитет по {ticker}</b> — {STANCE_EMOJI[proposal.stance]} "
         f"<b>{ACTION_RU[proposal.action]}</b> "
         f"(уверенность {round(proposal.confidence * 100)}%)",
         "",
-        proposal.rationale,
+        esc(proposal.rationale),
         "",
-        f"🎯 Тезис: {proposal.thesis}",
-        f"🚨 Инвалидация: {proposal.invalidation}",
+        f"🎯 Тезис: {esc(proposal.thesis)}",
+        f"🚨 Инвалидация: {esc(proposal.invalidation)}",
         "",
         f"Голоса: {votes} · дебаты: {rounds} раунд(а)",
         risk_line,
@@ -35,17 +35,17 @@ def format_council_protocol(views: list[SpecialistView], debate: list[dict],
     for v in views:
         lines.append(f"{ROLE_ICON[v.role]} <b>{v.role}</b> — {STANCE_EMOJI[v.stance]} "
                      f"{v.stance} ({round(v.confidence*100)}%)")
-        lines.append(v.summary)
-        lines += [f"• {p}" for p in v.key_points]
+        lines.append(esc(v.summary))
+        lines += [f"• {esc(p)}" for p in v.key_points]
         lines.append("")
     lines.append("⚔️ <b>Дебаты:</b>")
     for t in debate:
         who = "🐂 БЫК" if t["speaker"] == "bull" else "🐻 МЕДВЕДЬ"
-        lines.append(f"{who} (→ {t['position_after']}): {t['argument']}")
+        lines.append(f"{who} (→ {t['position_after']}): {esc(t['argument'])}")
     lines.append("")
-    lines.append(f"👔 <b>PM:</b> {proposal.rationale}")
+    lines.append(f"👔 <b>PM:</b> {esc(proposal.rationale)}")
     if risk.notes:
-        lines.append("🛡 Risk-заметки: " + "; ".join(risk.notes))
+        lines.append("🛡 Risk-заметки: " + esc("; ".join(risk.notes)))
     return chunk_lines(lines)
 
 

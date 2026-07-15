@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
+from html import escape as _html_escape
 
 from roaring_kittens.ai.schemas import AnalystReport
 from roaring_kittens.broker.models import PortfolioSnapshot
@@ -7,6 +8,11 @@ from roaring_kittens.news.models import NewsItem
 from roaring_kittens.scoring import TrackStats
 
 STANCE_EMOJI = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪️"}
+
+
+def esc(value) -> str:
+    """HTML-экранирование динамического (LLM/новостного) текста для Telegram."""
+    return _html_escape(str(value), quote=False)
 
 # Потолок показываемой уверенности, когда данных мало (нет техники или новостей).
 LOW_DATA_CONFIDENCE_CAP = 40
@@ -62,13 +68,13 @@ def format_analyst_report(r: AnalystReport, low_data: bool = False,
     lines = [
         f"{STANCE_EMOJI[r.stance]} <b>{r.ticker}</b> — {r.stance} ({conf_str})",
         "",
-        r.summary,
+        esc(r.summary),
         "",
         "<b>Ключевое:</b>",
-        *[f"• {p}" for p in r.key_points],
+        *[f"• {esc(p)}" for p in r.key_points],
         "",
         "<b>Риски:</b>",
-        *[f"⚠️ {p}" for p in r.risks],
+        *[f"⚠️ {esc(p)}" for p in r.risks],
     ]
     if sources:
         lines += _format_sources(sources)
