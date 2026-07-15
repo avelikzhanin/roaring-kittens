@@ -23,6 +23,7 @@ dependencies = [
     "cryptography>=42",
     "structlog>=24",
     "langgraph>=0.2",
+    "pgvector>=0.2",
 ]
 
 [project.optional-dependencies]

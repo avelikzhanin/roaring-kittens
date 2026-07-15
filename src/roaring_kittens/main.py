@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from openai import AsyncOpenAI
 
+from roaring_kittens.ai.embeddings import Embedder
 from roaring_kittens.ai.llm import LLM, make_db_usage_logger
 from roaring_kittens.broker.tinkoff_client import TinkoffBroker
 from roaring_kittens.config import Settings
@@ -37,10 +38,12 @@ async def run() -> None:
     universe = Universe(broker=broker)
     await universe.load()
 
-    llm = LLM(client=AsyncOpenAI(api_key=settings.openai_api_key),
-              usage_logger=make_db_usage_logger(session_factory))
+    openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
+    usage_logger = make_db_usage_logger(session_factory)
+    llm = LLM(client=openai_client, usage_logger=usage_logger)
+    embedder = Embedder(client=openai_client, usage_logger=usage_logger)
     deps = Deps(settings=settings, broker=broker, session_factory=session_factory,
-                universe=universe, llm=llm)
+                universe=universe, llm=llm, embedder=embedder)
 
     bot = Bot(token=settings.telegram_bot_token,
               default=DefaultBotProperties(parse_mode="HTML"))

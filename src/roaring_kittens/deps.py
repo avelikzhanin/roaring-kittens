@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from roaring_kittens.ai.embeddings import Embedder
 from roaring_kittens.ai.llm import LLM
 from roaring_kittens.broker.tinkoff_client import TinkoffBroker
 from roaring_kittens.config import Settings
@@ -18,4 +19,5 @@ class Deps:
     session_factory: async_sessionmaker[AsyncSession]
     universe: Universe
     llm: LLM
+    embedder: Embedder
     ask_limiter: DailyLimiter = field(default_factory=lambda: DailyLimiter(GUEST_ASK_DAILY_LIMIT))
