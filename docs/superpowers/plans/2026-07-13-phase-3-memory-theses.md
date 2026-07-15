@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS theses (
     thesis              TEXT NOT NULL,
     invalidation        TEXT NOT NULL,
     source              VARCHAR(20) NOT NULL,                   -- 'council' | 'auto'
+    backed_by_position  BOOLEAN NOT NULL DEFAULT false,         -- тезис подкреплён реальной позицией
     confidence          FLOAT,
     entry_price         NUMERIC,
     realized_return_pct NUMERIC,
@@ -248,11 +249,17 @@ theses = Table(
     Column("thesis", Text, nullable=False),
     Column("invalidation", Text, nullable=False),
     Column("source", String(20), nullable=False),
+    Column("backed_by_position", Boolean, nullable=False, server_default=text("false")),
     Column("confidence", Float),
     Column("entry_price", Numeric),
     Column("realized_return_pct", Numeric),
     Column("close_reason", Text),
 )
+```
+
+(в импорты tables.py добавить `Boolean`)
+
+```python
 
 insights = Table(
     "insights", metadata,
@@ -302,7 +309,8 @@ from decimal import Decimal
 import pytest
 
 from roaring_kittens.db.theses import (
-    close_thesis, get_active_theses, get_active_thesis, get_recently_closed, save_thesis,
+    close_thesis, get_active_theses, get_active_thesis, get_recently_closed,
+    get_recently_deleted_tickers, save_thesis, set_thesis_backed,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -325,20 +333,46 @@ async def test_save_supersedes_previous_active(db_session_factory):
         assert [t.id for t in all_active] == [second.id]  # старый закрыт как superseded
 
 
-async def test_close_thesis_and_recently_closed(db_session_factory):
+async def test_close_thesis_and_recently_closed_filters_technical(db_session_factory):
     async with db_session_factory() as session:
         t = await save_thesis(session, ticker="GAZP", figi="F2", thesis="t",
                               invalidation="i", source="auto", confidence=0.6,
+                              entry_price=None, backed_by_position=True)
+        d = await save_thesis(session, ticker="PLZL", figi="F3", thesis="t2",
+                              invalidation="i2", source="auto", confidence=0.5,
                               entry_price=None)
         await session.commit()
     async with db_session_factory() as session:
         await close_thesis(session, t.id, status="closed",
                            realized_return_pct=Decimal("4.2"),
                            close_reason="позиция закрыта")
+        await close_thesis(session, d.id, status="closed",
+                           realized_return_pct=None,
+                           close_reason="удалён владельцем")
         await session.commit()
         assert await get_active_thesis(session, "GAZP") is None
+        # рефлексия видит только реальные исходы — superseded/удалённые отфильтрованы
         recent = await get_recently_closed(session, days=7)
-        assert len(recent) == 1 and recent[0].realized_return_pct == Decimal("4.2")
+        assert [r.ticker for r in recent] == ["GAZP"]
+        assert recent[0].realized_return_pct == Decimal("4.2")
+        assert recent[0].backed_by_position is True
+        everything = await get_recently_closed(session, days=7, real_outcomes_only=False)
+        assert len(everything) == 2
+        # удалённые владельцем тикеры подавляются от повторной авто-генерации
+        assert await get_recently_deleted_tickers(session, days=30) == {"PLZL"}
+
+
+async def test_set_thesis_backed(db_session_factory):
+    async with db_session_factory() as session:
+        t = await save_thesis(session, ticker="LKOH", figi="F4", thesis="идея",
+                              invalidation="i", source="council", confidence=0.7,
+                              entry_price=None)  # идея: backed=False по умолчанию
+        await session.commit()
+    async with db_session_factory() as session:
+        await set_thesis_backed(session, t.id)
+        await session.commit()
+        active = await get_active_thesis(session, "LKOH")
+        assert active.backed_by_position is True
 ```
 
 - [ ] **Step 2: Реализовать**
@@ -356,6 +390,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from roaring_kittens.db.tables import theses
 
 
+TECH_CLOSE_REASONS = ("superseded", "удалён владельцем")
+
+
 @dataclass(frozen=True)
 class ThesisRecord:
     id: UUIDType
@@ -371,6 +408,7 @@ class ThesisRecord:
     entry_price: Decimal | None
     realized_return_pct: Decimal | None
     close_reason: str | None
+    backed_by_position: bool = False  # False = «идея» без реальной позиции
 
 
 def _row(r) -> ThesisRecord:
@@ -379,12 +417,14 @@ def _row(r) -> ThesisRecord:
                         invalidation=r.invalidation, source=r.source,
                         confidence=r.confidence, entry_price=r.entry_price,
                         realized_return_pct=r.realized_return_pct,
-                        close_reason=r.close_reason)
+                        close_reason=r.close_reason,
+                        backed_by_position=r.backed_by_position)
 
 
 async def save_thesis(session: AsyncSession, *, ticker: str, figi: str, thesis: str,
                       invalidation: str, source: str, confidence: float | None,
-                      entry_price: Decimal | None) -> ThesisRecord:
+                      entry_price: Decimal | None,
+                      backed_by_position: bool = False) -> ThesisRecord:
     """Один активный тезис на тикер: прежний закрывается как superseded."""
     await session.execute(
         update(theses)
@@ -394,9 +434,17 @@ async def save_thesis(session: AsyncSession, *, ticker: str, figi: str, thesis: 
     result = await session.execute(
         theses.insert().values(ticker=ticker, figi=figi, thesis=thesis,
                                invalidation=invalidation, source=source,
-                               confidence=confidence, entry_price=entry_price)
+                               confidence=confidence, entry_price=entry_price,
+                               backed_by_position=backed_by_position)
         .returning(theses))
     return _row(result.first())
+
+
+async def set_thesis_backed(session: AsyncSession, thesis_id: UUIDType) -> None:
+    """Идея превратилась в реальную позицию — тезис теперь подкреплён."""
+    await session.execute(
+        update(theses).where(theses.c.id == thesis_id)
+        .values(backed_by_position=True))
 
 
 async def get_active_thesis(session: AsyncSession, ticker: str) -> ThesisRecord | None:
@@ -422,12 +470,26 @@ async def close_thesis(session: AsyncSession, thesis_id: UUIDType, *, status: st
                 realized_return_pct=realized_return_pct, close_reason=close_reason))
 
 
-async def get_recently_closed(session: AsyncSession, days: int = 7) -> list[ThesisRecord]:
+async def get_recently_closed(session: AsyncSession, days: int = 7,
+                              real_outcomes_only: bool = True) -> list[ThesisRecord]:
+    """real_outcomes_only: superseded/удалённые — технический шум, не исход сделки."""
+    since = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    stmt = select(theses).where(theses.c.status != "active",
+                                theses.c.closed_at >= since)
+    if real_outcomes_only:
+        stmt = stmt.where(theses.c.close_reason.notin_(TECH_CLOSE_REASONS))
+    rows = (await session.execute(stmt)).fetchall()
+    return [_row(r) for r in rows]
+
+
+async def get_recently_deleted_tickers(session: AsyncSession,
+                                       days: int = 30) -> set[str]:
+    """Тикеры, чей авто-тезис владелец удалил — не регенерировать месяц."""
     since = datetime.now(tz=timezone.utc) - timedelta(days=days)
     rows = (await session.execute(
-        select(theses).where(theses.c.status != "active",
-                             theses.c.closed_at >= since))).fetchall()
-    return [_row(r) for r in rows]
+        select(theses.c.ticker).where(theses.c.close_reason == "удалён владельцем",
+                                      theses.c.closed_at >= since))).fetchall()
+    return {r[0] for r in rows}
 ```
 
 - [ ] **Step 3: Commit**
@@ -777,7 +839,7 @@ NOW = datetime.now(tz=timezone.utc)
 
 class FakeSession:
     async def __aenter__(self):
-        return object()
+        return self  # ВАЖНО: self, а не object() — build_memory_note зовёт session.commit()
 
     async def __aexit__(self, *args):
         return False
@@ -896,12 +958,15 @@ async def build_memory_note(deps, ticker: str, situation_text: str) -> str | Non
     memory_note: str | None = None
 ```
 
-В `build_council_context` перед `return`:
+Сигнатуру `build_council_context` расширить: `..., today: date, include_memory: bool = True)`.
+Перед `return`:
 
 ```python
-    situation = f"{tech.as_text() if tech else 'нет техники'}; " + \
-                "; ".join(n.headline for n in facts[:5])
-    memory_note = await build_memory_note(deps, instrument.ticker, situation)
+    memory_note = None
+    if include_memory:  # авто-тезис (position-sync) память не использует — не тратим вызовы
+        situation = f"{tech.as_text() if tech else 'нет техники'}; " + \
+                    "; ".join(n.headline for n in facts[:5])
+        memory_note = await build_memory_note(deps, instrument.ticker, situation)
 ```
 
 (импорт `from roaring_kittens.committee.memory import build_memory_note`; в return добавить `memory_note=memory_note`)
@@ -1086,9 +1151,11 @@ async def _persist_council(deps, instrument: Instrument, asked_by: int,
                 price_at_call=ctx.tech.last_close if ctx.tech else None,
                 news_urls=[n.url for n in ctx.news_facts + ctx.crowd_posts],
                 embedding=embedding)
+        held = bool(ctx.position_note) and "НЕТ" not in ctx.position_note
         transcript = {
             "meta": {"ticker": instrument.ticker, "figi": instrument.figi,
-                     "price_at_call": str(ctx.tech.last_close) if ctx.tech else None},
+                     "price_at_call": str(ctx.tech.last_close) if ctx.tech else None,
+                     "held": held},
             "views": [v.model_dump() for v in state["views"]],
             "debate": state["debate"],
             "proposal": proposal.model_dump(),
@@ -1331,32 +1398,36 @@ def _pos(ticker, qty="100", cur="100"):
                     current_price=Decimal(cur), pnl_pct=Decimal("11.1"))
 
 
-def _thesis(ticker):
+def _thesis(ticker, backed=True):
     return ThesisRecord(id=ticker, ticker=ticker, figi=f"F-{ticker}",
                         opened_at=datetime.now(tz=timezone.utc), closed_at=None,
                         status="active", thesis="t", invalidation="i", source="auto",
                         confidence=0.5, entry_price=None, realized_return_pct=None,
-                        close_reason=None)
+                        close_reason=None, backed_by_position=backed)
 
 
-def test_diff_detects_closures_and_new_big_positions():
-    # Портфель 100k: SBER 60k (60%), LKOH 40k (40%)... и тезис по проданному GAZP
+def test_diff_detects_closures_new_positions_and_backing():
+    # Портфель 100k: SBER 60k (60%), LKOH 40k (40%).
     snap = PortfolioSnapshot(total_value=Decimal("100000"),
                              positions=[_pos("SBER", qty="600"),
                                         _pos("LKOH", qty="400")])
-    actions = diff_positions(snap, [_thesis("GAZP"), _thesis("SBER")],
-                             min_weight_pct=Decimal("5"))
-    assert [t.ticker for t in actions.to_close] == ["GAZP"]   # позиции нет — закрыть
-    assert [p.ticker for p in actions.to_draft] == ["LKOH"]   # ≥5% и без тезиса
+    active = [_thesis("GAZP", backed=True),    # позиция продана — закрыть с результатом
+              _thesis("OZON", backed=False),   # ИДЕЯ по некупленной бумаге — НЕ трогать
+              _thesis("SBER", backed=False)]   # идея, а бумага теперь куплена — пометить backed
+    actions = diff_positions(snap, active, suppressed=set())
+    assert [t.ticker for t in actions.to_close] == ["GAZP"]
+    assert [p.ticker for p in actions.to_draft] == ["LKOH"]  # ≥5% и без тезиса
+    assert [t.ticker for t in actions.to_back] == ["SBER"]   # идея стала позицией
 
 
-def test_diff_skips_small_positions_and_empty_snapshot():
+def test_diff_respects_suppressed_and_small_positions():
     snap = PortfolioSnapshot(total_value=Decimal("100000"),
-                             positions=[_pos("PLZL", qty="1")])  # 100/100k = 0.1%
-    actions = diff_positions(snap, [], min_weight_pct=Decimal("5"))
-    assert actions.to_draft == [] and actions.to_close == []
+                             positions=[_pos("SBER", qty="600"),
+                                        _pos("PLZL", qty="1")])   # 100/100k = 0.1%
+    actions = diff_positions(snap, [], suppressed={"SBER"})       # владелец удалял тезис
+    assert actions.to_draft == [] and actions.to_close == [] and actions.to_back == []
     empty = PortfolioSnapshot(total_value=Decimal("0"), positions=[])
-    actions = diff_positions(empty, [_thesis("SBER")], min_weight_pct=Decimal("5"))
+    actions = diff_positions(empty, [_thesis("SBER", backed=True)], suppressed=set())
     assert [t.ticker for t in actions.to_close] == ["SBER"]
 ```
 
@@ -1377,7 +1448,11 @@ from roaring_kittens.broker.position_note import position_weight_pct
 from roaring_kittens.committee.context import build_council_context
 from roaring_kittens.committee.thesis_gen import run_thesis_draft
 from roaring_kittens.db.owner import fetch_owner_id
-from roaring_kittens.db.theses import ThesisRecord, close_thesis, get_active_theses, save_thesis
+from roaring_kittens.db.theses import (
+    ThesisRecord, close_thesis, get_active_theses, get_recently_deleted_tickers,
+    save_thesis, set_thesis_backed,
+)
+from roaring_kittens.telegram.formatting import esc
 from roaring_kittens.universe.universe import Instrument
 
 log = structlog.get_logger()
@@ -1387,19 +1462,24 @@ MIN_THESIS_WEIGHT_PP = Decimal("5")
 
 @dataclass(frozen=True)
 class SyncActions:
-    to_close: list[ThesisRecord]   # активный тезис, позиции больше нет
-    to_draft: list[Position]       # позиция ≥ порога без активного тезиса
+    to_close: list[ThesisRecord]   # ПОДКРЕПЛЁННЫЙ тезис, позиции больше нет
+    to_draft: list[Position]       # позиция ≥ порога без активного тезиса (и не подавлена)
+    to_back: list[ThesisRecord]    # тезис-«идея», бумага теперь реально куплена
 
 
 def diff_positions(snap: PortfolioSnapshot, active: list[ThesisRecord],
+                   suppressed: set[str],
                    min_weight_pct: Decimal = MIN_THESIS_WEIGHT_PP) -> SyncActions:
     held = {p.ticker for p in snap.positions}
     with_thesis = {t.ticker for t in active}
-    to_close = [t for t in active if t.ticker not in held]
+    # закрываем ТОЛЬКО подкреплённые тезисы: идея по некупленной бумаге — не «продажа»
+    to_close = [t for t in active if t.backed_by_position and t.ticker not in held]
+    to_back = [t for t in active if not t.backed_by_position and t.ticker in held]
     to_draft = [p for p in snap.positions
                 if p.ticker not in with_thesis
+                and p.ticker not in suppressed
                 and (position_weight_pct(snap, p.ticker) or Decimal("0")) >= min_weight_pct]
-    return SyncActions(to_close=to_close, to_draft=to_draft)
+    return SyncActions(to_close=to_close, to_draft=to_draft, to_back=to_back)
 
 
 async def _realized_return(deps, thesis: ThesisRecord) -> Decimal | None:
@@ -1426,7 +1506,13 @@ async def sync_positions(deps, bot) -> None:
         return
     async with deps.session_factory() as session:
         active = await get_active_theses(session)
-    actions = diff_positions(snap, active)
+        suppressed = await get_recently_deleted_tickers(session, days=30)
+    actions = diff_positions(snap, active, suppressed=suppressed)
+
+    for thesis in actions.to_back:  # идея подтвердилась покупкой
+        async with deps.session_factory() as session:
+            await set_thesis_backed(session, thesis.id)
+            await session.commit()
 
     for thesis in actions.to_close:
         ret = await _realized_return(deps, thesis)
@@ -1439,14 +1525,15 @@ async def sync_positions(deps, bot) -> None:
                                        " за время тезиса")
         await bot.send_message(owner_id,
                                f"📕 Позиция {thesis.ticker} закрыта — тезис закрыт{sign}.\n"
-                               f"Тезис был: {thesis.thesis}")
+                               f"Тезис был: {esc(thesis.thesis)}")
 
     for pos in actions.to_draft:
         instrument = deps.universe.get(pos.ticker) or Instrument(
             ticker=pos.ticker, figi=pos.figi, name=pos.name, aliases=frozenset())
         try:
             ctx = await build_council_context(deps, instrument, owner_id,
-                                              today=datetime.now(tz=timezone.utc).date())
+                                              today=datetime.now(tz=timezone.utc).date(),
+                                              include_memory=False)
             draft = await run_thesis_draft(deps.llm, ctx)
         except Exception as exc:
             log.error("thesis_draft_failed", ticker=pos.ticker, error=str(exc))
@@ -1455,7 +1542,7 @@ async def sync_positions(deps, bot) -> None:
             rec = await save_thesis(session, ticker=pos.ticker, figi=pos.figi,
                                     thesis=draft.thesis, invalidation=draft.invalidation,
                                     source="auto", confidence=draft.confidence,
-                                    entry_price=pos.avg_price)
+                                    entry_price=pos.avg_price, backed_by_position=True)
             await session.commit()
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
@@ -1463,8 +1550,8 @@ async def sync_positions(deps, bot) -> None:
         await bot.send_message(
             owner_id,
             f"📌 Обнаружена позиция <b>{pos.ticker}</b> (вес ≥5%) без тезиса.\n"
-            f"Сгенерировал тезис: {draft.thesis}\n"
-            f"🚨 Инвалидация: {draft.invalidation}\n"
+            f"Сгенерировал тезис: {esc(draft.thesis)}\n"
+            f"🚨 Инвалидация: {esc(draft.invalidation)}\n"
             f"Буду проверять его каждой новостью. Не согласен — удали.",
             reply_markup=kb)
     log.info("positions_synced", closed=len(actions.to_close),
@@ -1508,7 +1595,33 @@ def test_decide_validation_action():
     assert decide_validation_action("still_valid", council_recent=False) == "nothing"
 ```
 
-- [ ] **Step 2: Реализовать decide + hook**
+- [ ] **Step 2: save_news возвращает вставленные URL (точность вместо окна)**
+
+В `news/repository.py` `save_news` — заменить возврат:
+
+```python
+async def save_news(session: AsyncSession, items: list[NewsItem]) -> list[str]:
+    """Вставка с дедупом по url. Возвращает url'ы РЕАЛЬНО вставленных строк."""
+    if not items:
+        return []
+    rows = [
+        dict(published_at=i.published_at, tickers=i.tickers, source=i.source,
+             headline=i.headline, body=i.body, url=i.url)
+        for i in items
+    ]
+    stmt = insert(news_events).values(rows) \
+        .on_conflict_do_nothing(index_elements=["url"]) \
+        .returning(news_events.c.url)
+    result = await session.execute(stmt)
+    return [r[0] for r in result.fetchall()]
+```
+
+Обновить существующие тесты `tests/test_news_repository.py`: `inserted` теперь список —
+`assert inserted == ["https://x/1"]` в первом кейсе, `assert again == []` во втором,
+в `test_query_by_ticker_and_window` — обёртка не нужна (результат не проверяется по счёту).
+В `scoring/digest` save_news не используется; в `scheduler.poll_news` — правится ниже.
+
+- [ ] **Step 3: Реализовать decide + hook**
 
 В `thesis_check.py` добавить:
 
@@ -1531,27 +1644,27 @@ from roaring_kittens.committee.thesis_check import decide_validation_action, run
 from roaring_kittens.db.calls import council_ran_recently
 from roaring_kittens.db.owner import fetch_owner_id
 from roaring_kittens.db.theses import close_thesis, get_active_theses
-from roaring_kittens.news.repository import get_news_for_tickers
-from datetime import datetime, timedelta, timezone
+from roaring_kittens.telegram.formatting import esc
 
 
-async def validate_theses(deps, bot, fresh_tickers: set[str]) -> None:
-    """Проверка активных тезисов, чьих тикеров коснулись НОВЫЕ новости."""
-    if not fresh_tickers:
+async def validate_theses(deps, bot, fresh_items: list) -> None:
+    """Проверка активных тезисов ТОЛЬКО реально новыми новостями (без окна — без спама)."""
+    if not fresh_items:
         return
     owner_id = await fetch_owner_id(deps.session_factory)
     if owner_id is None:
         return
+    by_ticker: dict[str, list] = {}
+    for item in fresh_items:
+        for t in item.tickers:
+            by_ticker.setdefault(t, []).append(item)
     async with deps.session_factory() as session:
         theses_to_check = [t for t in await get_active_theses(session)
-                           if t.ticker in fresh_tickers]
+                           if t.ticker in by_ticker]
     for thesis in theses_to_check:
-        since = datetime.now(tz=timezone.utc) - timedelta(hours=2)
+        news = by_ticker[thesis.ticker]
         async with deps.session_factory() as session:
-            news = await get_news_for_tickers(session, [thesis.ticker], since=since)
             recent = await council_ran_recently(session, thesis.ticker, hours=24)
-        if not news:
-            continue
         try:
             check = await run_thesis_check(deps.llm, thesis, news)
         except Exception as exc:
@@ -1563,14 +1676,15 @@ async def validate_theses(deps, bot, fresh_tickers: set[str]) -> None:
         if action == "notify":
             await bot.send_message(
                 owner_id,
-                f"⚠️ Тезис по <b>{thesis.ticker}</b> {'СЛОМАН' if check.status == 'invalidated' else 'ослаблен'}: "
-                f"{check.reasoning_short}\nТезис: {thesis.thesis}")
+                f"⚠️ Тезис по <b>{thesis.ticker}</b> "
+                f"{'СЛОМАН' if check.status == 'invalidated' else 'ослаблен'}: "
+                f"{esc(check.reasoning_short)}\nТезис: {esc(thesis.thesis)}")
             continue
         # action == "council": автозапуск комитета
         await bot.send_message(
             owner_id,
-            f"🚨 Новости ломают тезис по <b>{thesis.ticker}</b>: {check.reasoning_short}\n"
-            f"Собираю комитет…")
+            f"🚨 Новости ломают тезис по <b>{thesis.ticker}</b>: "
+            f"{esc(check.reasoning_short)}\nСобираю комитет…")
         instrument = deps.universe.resolve(thesis.ticker)
         if instrument is None:
             continue
@@ -1584,11 +1698,23 @@ async def validate_theses(deps, bot, fresh_tickers: set[str]) -> None:
                                realized_return_pct=None,
                                close_reason=f"новости: {check.reasoning_short}")
             await session.commit()
+        # Комитет предложил замену старому тезису — даём принять кнопкой
+        keyboard = None
+        if outcome.run_id is not None:
+            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+            buttons = [[InlineKeyboardButton(text="📜 Протокол",
+                                             callback_data=f"proto:{outcome.run_id}")]]
+            if outcome.risk.approved and outcome.proposal.action in ("buy", "hold"):
+                buttons.append([InlineKeyboardButton(
+                    text="📌 Принять новый тезис",
+                    callback_data=f"thesis_save:{outcome.run_id}")])
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         await bot.send_message(
             owner_id,
             format_council_verdict(instrument.ticker, outcome.state["views"],
                                    outcome.state["debate"], outcome.proposal,
-                                   outcome.risk))
+                                   outcome.risk),
+            reply_markup=keyboard)
 ```
 
 В `poll_news`: собрать тикеры реально ВСТАВЛЕННЫХ новостей и передать. `save_news` возвращает count, не тикеры — считаем тикеры relevant-новостей источника, где `inserted > 0`:
@@ -1596,25 +1722,22 @@ async def validate_theses(deps, bot, fresh_tickers: set[str]) -> None:
 ```python
 async def poll_news(deps: Deps, bot=None) -> None:
     alias_map = deps.universe.alias_map()
-    total_inserted = 0
-    fresh_tickers: set[str] = set()
+    fresh_items = []  # ТОЛЬКО реально вставленные новости — точность вместо окна
     for source_id, url in SOURCES:
         items = await fetch_feed(url, source=source_id)
         for item in items:
             item.tickers = match_tickers(f"{item.headline} {item.body or ''}", alias_map)
         relevant = [i for i in items if i.tickers]
         async with deps.session_factory() as session:
-            inserted = await save_news(session, relevant)
+            inserted_urls = await save_news(session, relevant)
             await session.commit()
-        total_inserted += inserted
-        if inserted:
-            fresh_tickers |= {t for i in relevant for t in i.tickers}
+        fresh_items += [i for i in relevant if i.url in set(inserted_urls)]
         log.info("news_polled", source=source_id, fetched=len(items),
-                 relevant=len(relevant), inserted=inserted)
-    log.info("news_poll_done", inserted=total_inserted)
-    if bot is not None and total_inserted:
+                 relevant=len(relevant), inserted=len(inserted_urls))
+    log.info("news_poll_done", inserted=len(fresh_items))
+    if bot is not None and fresh_items:
         try:
-            await validate_theses(deps, bot, fresh_tickers)
+            await validate_theses(deps, bot, fresh_items)
         except Exception as exc:
             log.error("validate_theses_failed", error=str(exc))
 ```
@@ -1780,9 +1903,10 @@ async def weekly_reflection_job(deps, bot) -> None:
         return
     week_ago = datetime.now(tz=timezone.utc) - timedelta(days=7)
     async with deps.session_factory() as session:
-        closed = await get_recently_closed(session, days=7)
+        closed = await get_recently_closed(session, days=7)  # только реальные исходы
         scored = [s for s in await get_scored_calls(session)
-                  if s.scored_at and s.scored_at >= week_ago]
+                  if s.scored_at and s.scored_at >= week_ago
+                  and s.horizon_days == 20]  # один горизонт — без дублей
     result = await run_reflection(deps.llm, closed, scored)
     if result is None:
         log.info("reflection_skipped_no_material")
@@ -1860,7 +1984,8 @@ def test_format_theses_lists_active():
                      entry_price=Decimal("280"), realized_return_pct=None,
                      close_reason=None)
     text = format_theses([t])
-    assert "SBER" in text and "дивидендная" in text and "дивы < 20" in text
+    # LLM-текст экранируется для HTML parse_mode: "<" -> "&lt;"
+    assert "SBER" in text and "дивидендная" in text and "дивы &lt; 20" in text
 
 
 def test_format_theses_empty():
@@ -1887,7 +2012,28 @@ def test_format_history_with_scores():
     assert "SBER" in text and "hit" in text and "council" in text
 ```
 
-- [ ] **Step 2: Реализовать handler**
+- [ ] **Step 2: esc() — HTML-экранирование LLM-текстов (чинит и латентный прод-баг)**
+
+Бот шлёт с parse_mode=HTML; LLM-текст с `<` (например «дивы < 20 ₽») роняет отправку.
+В `telegram/formatting.py` добавить:
+
+```python
+from html import escape as _html_escape
+
+
+def esc(value) -> str:
+    """HTML-экранирование динамического (LLM/новостного) текста для Telegram."""
+    return _html_escape(str(value), quote=False)
+```
+
+И применить в СУЩЕСТВУЮЩИХ рендерах (латентный баг Phase 1-2):
+- `format_analyst_report`: `esc(r.summary)`, `esc(p)` в key_points и risks;
+- `committee/render.py` `format_council_verdict`: `esc(proposal.rationale)`, `esc(proposal.thesis)`, `esc(proposal.invalidation)`, `esc(risk.veto_reason)`;
+- `format_council_protocol`: `esc(v.summary)`, `esc(p)` в key_points, `esc(t['argument'])`, `esc(proposal.rationale)`, notes.
+
+Существующие тесты не содержат `<` в этих полях — не ломаются.
+
+- [ ] **Step 3: Реализовать handler**
 
 ```python
 # src/roaring_kittens/telegram/handlers/thesis.py
@@ -1906,10 +2052,12 @@ from roaring_kittens.db.theses import (
     ThesisRecord, close_thesis, get_active_theses, save_thesis,
 )
 from roaring_kittens.deps import Deps
-from roaring_kittens.telegram.formatting import STANCE_EMOJI
+from roaring_kittens.telegram.formatting import STANCE_EMOJI, esc
 
 log = structlog.get_logger()
 router = Router()
+
+NOT_OWNER = "🔒 Доступно только владельцу (данные привязаны к его портфелю и разборам)."
 
 
 def format_theses(theses: list[ThesisRecord]) -> str:
@@ -1919,9 +2067,10 @@ def format_theses(theses: list[ThesisRecord]) -> str:
                 "автоматически для позиций ≥5% портфеля.")
     lines = ["📌 <b>Активные тезисы:</b>", ""]
     for t in theses:
-        lines.append(f"<b>{t.ticker}</b> (с {t.opened_at:%d.%m}, {t.source})")
-        lines.append(f"🎯 {t.thesis}")
-        lines.append(f"🚨 Инвалидация: {t.invalidation}")
+        idea = "" if t.backed_by_position else " · идея"
+        lines.append(f"<b>{t.ticker}</b> (с {t.opened_at:%d.%m}, {t.source}{idea})")
+        lines.append(f"🎯 {esc(t.thesis)}")
+        lines.append(f"🚨 Инвалидация: {esc(t.invalidation)}")
         lines.append("")
     lines.append("Каждая свежая новость по тикеру проверяет тезис автоматически.")
     return "\n".join(lines)
@@ -1933,7 +2082,7 @@ def format_insights(items: list[InsightRecord]) -> str:
                 "(вс 23:00), когда есть закрытые тезисы или оценённые разборы.")
     lines = ["💡 <b>Уроки бота:</b>", ""]
     for i in items[:15]:
-        lines.append(f"• {i.summary}")
+        lines.append(f"• {esc(i.summary)}")
         lines.append(f"   [{i.scope}] уверенность {round(i.confidence*100)}% · "
                      f"применён {i.times_applied} раз")
     return "\n".join(lines)
@@ -1951,7 +2100,7 @@ def format_history(ticker: str, items: list[HistoryItem]) -> str:
                      f"({h.score_20d.verdict})")
         lines.append(f"{h.created_at:%d.%m} [{h.source}] {STANCE_EMOJI[h.stance]} "
                      f"{h.stance} {round(h.confidence*100)}%{score}")
-        lines.append(f"   {h.summary[:150]}")
+        lines.append(f"   {esc(h.summary[:150])}")
     return "\n".join(lines)
 
 
@@ -1968,6 +2117,11 @@ async def cmd_thesis(message: Message, deps: Deps) -> None:
 
 @router.message(Command("insights"))
 async def cmd_insights(message: Message, deps: Deps) -> None:
+    # owner-only: уроки выводятся из сделок владельца — могут раскрывать его результаты
+    owner_id = await fetch_owner_id(deps.session_factory)
+    if message.from_user.id != owner_id:
+        await message.answer(NOT_OWNER)
+        return
     async with deps.session_factory() as session:
         items = await list_active_insights(session)
     await message.answer(format_insights(items))
@@ -1975,6 +2129,12 @@ async def cmd_insights(message: Message, deps: Deps) -> None:
 
 @router.message(Command("history"))
 async def cmd_history(message: Message, command: CommandObject, deps: Deps) -> None:
+    # owner-only: summary council-разборов может содержать позицию владельца
+    # (протокол комитета owner-gated ровно по этой причине)
+    owner_id = await fetch_owner_id(deps.session_factory)
+    if message.from_user.id != owner_id:
+        await message.answer(NOT_OWNER)
+        return
     if not command.args:
         await message.answer("Формат: <code>/history SBER</code>")
         return
@@ -2005,16 +2165,25 @@ async def cb_thesis_save(callback: CallbackQuery, deps: Deps) -> None:
         return
     meta, proposal = transcript["meta"], transcript["proposal"]
     from decimal import Decimal
-    entry = Decimal(meta["price_at_call"]) if meta.get("price_at_call") else None
+
+    from roaring_kittens.db.theses import get_active_thesis
     async with deps.session_factory() as session:
+        # guard от двойного тапа/старой кнопки: тот же тезис не пересохраняем
+        existing = await get_active_thesis(session, meta["ticker"])
+        if existing and existing.thesis == proposal["thesis"]:
+            await callback.message.answer("📌 Этот тезис уже принят. /thesis — все.")
+            return
+        entry = Decimal(meta["price_at_call"]) if meta.get("price_at_call") else None
         await save_thesis(session, ticker=meta["ticker"], figi=meta["figi"],
                           thesis=proposal["thesis"],
                           invalidation=proposal["invalidation"], source="council",
-                          confidence=proposal["confidence"], entry_price=entry)
+                          confidence=proposal["confidence"], entry_price=entry,
+                          backed_by_position=meta.get("held", False))
         await session.commit()
     await callback.message.answer(
-        f"📌 Тезис по <b>{meta['ticker']}</b> принят:\n🎯 {proposal['thesis']}\n"
-        f"🚨 {proposal['invalidation']}\nБуду проверять его каждой новостью. /thesis — все.")
+        f"📌 Тезис по <b>{meta['ticker']}</b> принят:\n🎯 {esc(proposal['thesis'])}\n"
+        f"🚨 {esc(proposal['invalidation'])}\n"
+        f"Буду проверять его каждой новостью. /thesis — все.")
 
 
 @router.callback_query(F.data.startswith("thesis_del:"))
@@ -2100,4 +2269,16 @@ git add README.md && git commit -m "docs: phase 3 README" && git tag phase-3
 - **Типы согласованы:** `ThesisRecord` (T3) в T8/T9/T10/T11/T12; `SimilarCall`/`HistoryItem` (T5) в T6/T12; `save_call(embedding=...)` (T5) в T7-runner; `ScoredCall.scored_at` добавлен последним с default (T11) — конструкторы в старых тестах не ломаются; `run_council_flow` (T7) в T10; `council_ctx` фикстура расширена `memory_note=None` (T6)
 - **Placeholder scan:** полный код в каждом шаге ✅
 - **Cost-контроль:** thesis_check — mini и только на СВЕЖИХ новостях; авто-комитет ≤1/сутки/тикер (council_ran_recently); авто-тезис только для ≥5% позиций; embeddings копеечные ✅
-- **Приватность:** /thesis и thesis-callbacks owner-gated; /insights и /history публичны (не палят позиции — только разборы) ✅
+- **Приватность:** /thesis, /insights, /history и все thesis-callbacks owner-gated (council-summary и уроки могут содержать позицию/результаты владельца) ✅
+
+## Adversarial review (2026-07-14: 3 ревьюера-агента + ручная верификация 18 находок из-за лимита субагентов)
+
+19 сырых → 10 реальных дефектов исправлено: FakeSession-блокер теста памяти; `backed_by_position`
+(идея-тезис не закрывается ложно position-sync'ом, идея→позиция флипается); owner-гейты на
+/history и /insights; фильтр технических закрытий в рефлексии + один горизонт (20д); **HTML-escape
+LLM-текстов** (`esc()`, включая латентный баг Phase 1-2 рендеров); save_news возвращает вставленные
+URL → валидатор работает по точному списку новых новостей (нет ре-спама и пропуска «старых»);
+авто-комитет предлагает новый тезис кнопкой; удалённый тезис подавляет регенерацию 30 дней;
+дубль-guard кнопки «Принять тезис»; include_memory=False для авто-тезиса.
+Отклонено 4: guard авто-комитета «слеп к вето» (закрытие тезиса — эффективный guard),
+вечная кнопка (solo-owner), embed-fail-навсегда (приемлемо), HELP-раскладка (снята owner-гейтом).
