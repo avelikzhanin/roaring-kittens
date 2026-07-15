@@ -1,5 +1,6 @@
-from sqlalchemy import (BigInteger, TIMESTAMP, Column, Float, ForeignKey, Integer,
-                        MetaData, Numeric, String, Table, Text, text)
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (TIMESTAMP, BigInteger, Boolean, Column, Float, ForeignKey,
+                        Integer, MetaData, Numeric, String, Table, Text, text)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 
 metadata = MetaData()
@@ -18,6 +19,38 @@ calls = Table(
     Column("summary", Text, nullable=False),
     Column("price_at_call", Numeric),
     Column("news_urls", ARRAY(Text), nullable=False, server_default=text("'{}'")),
+    Column("embedding", Vector(1536)),
+)
+
+theses = Table(
+    "theses", metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")),
+    Column("ticker", String(20), nullable=False),
+    Column("figi", String(20), nullable=False),
+    Column("opened_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    Column("closed_at", TIMESTAMP(timezone=True)),
+    Column("status", String(20), nullable=False, server_default=text("'active'")),
+    Column("thesis", Text, nullable=False),
+    Column("invalidation", Text, nullable=False),
+    Column("source", String(20), nullable=False),
+    Column("backed_by_position", Boolean, nullable=False, server_default=text("false")),
+    Column("confidence", Float),
+    Column("entry_price", Numeric),
+    Column("realized_return_pct", Numeric),
+    Column("close_reason", Text),
+)
+
+insights = Table(
+    "insights", metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    Column("summary", Text, nullable=False),
+    Column("scope", String(50), nullable=False),
+    Column("scope_value", String(50)),
+    Column("confidence", Float, nullable=False),
+    Column("embedding", Vector(1536)),
+    Column("times_applied", Integer, nullable=False, server_default=text("0")),
+    Column("archived_at", TIMESTAMP(timezone=True)),
 )
 
 call_scores = Table(

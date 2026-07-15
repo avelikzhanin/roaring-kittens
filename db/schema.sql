@@ -41,6 +41,42 @@ CREATE TABLE IF NOT EXISTS call_scores (
     PRIMARY KEY (call_id, horizon_days)
 );
 
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS embedding VECTOR(1536);
+CREATE INDEX IF NOT EXISTS idx_calls_embedding ON calls
+    USING hnsw (embedding vector_cosine_ops);
+
+CREATE TABLE IF NOT EXISTS theses (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ticker              VARCHAR(20) NOT NULL,
+    figi                VARCHAR(20) NOT NULL,
+    opened_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    closed_at           TIMESTAMPTZ,
+    status              VARCHAR(20) NOT NULL DEFAULT 'active',  -- active|closed|invalidated
+    thesis              TEXT NOT NULL,
+    invalidation        TEXT NOT NULL,
+    source              VARCHAR(20) NOT NULL,                   -- 'council' | 'auto'
+    backed_by_position  BOOLEAN NOT NULL DEFAULT false,         -- тезис подкреплён реальной позицией
+    confidence          FLOAT,
+    entry_price         NUMERIC,
+    realized_return_pct NUMERIC,
+    close_reason        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_theses_status ON theses (status, ticker);
+
+CREATE TABLE IF NOT EXISTS insights (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    summary       TEXT NOT NULL,
+    scope         VARCHAR(50) NOT NULL,     -- ticker|sector|pattern|general
+    scope_value   VARCHAR(50),
+    confidence    FLOAT NOT NULL,
+    embedding     VECTOR(1536),
+    times_applied INTEGER NOT NULL DEFAULT 0,
+    archived_at   TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_insights_embedding ON insights
+    USING hnsw (embedding vector_cosine_ops);
+
 CREATE TABLE IF NOT EXISTS council_runs (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

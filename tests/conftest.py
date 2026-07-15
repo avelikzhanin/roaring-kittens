@@ -17,7 +17,8 @@ async def db_session_factory():
     conn = await asyncpg.connect(raw)
     await conn.execute(schema)
     await conn.execute(
-        "TRUNCATE news_events, usage_log, bot_state, council_runs, call_scores, calls")
+        "TRUNCATE news_events, usage_log, bot_state, council_runs, call_scores, "
+        "calls, theses, insights")
     await conn.close()
 
     engine = create_async_engine(TEST_DB)
