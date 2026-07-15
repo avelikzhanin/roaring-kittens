@@ -26,6 +26,8 @@ def build_debate_user(ctx: CouncilContext, views: list[SpecialistView],
         parts.append(f"\n{ctx.position_note}")
     if ctx.prev_call_note:
         parts.append(ctx.prev_call_note)
+    if ctx.memory_note:
+        parts.append(f"\n{ctx.memory_note}")
     if debate_log:
         parts.append("\nХод дебатов:")
         for t in debate_log:

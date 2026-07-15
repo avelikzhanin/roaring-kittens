@@ -46,12 +46,17 @@ async def test_build_context_splits_news_and_survives_empty_account(monkeypatch)
     async def fake_owner(session_factory):
         return 42
 
+    async def fake_memory(deps, ticker, situation):
+        return None
+
     monkeypatch.setattr(ctx_mod, "get_news_for_tickers", fake_news)
     monkeypatch.setattr(ctx_mod, "get_last_call", fake_last_call)
     monkeypatch.setattr(ctx_mod, "fetch_owner_id", fake_owner)
+    monkeypatch.setattr(ctx_mod, "build_memory_note", fake_memory)
     deps = SimpleNamespace(broker=FakeBroker(), session_factory=lambda: FakeSession())
 
     ctx = await build_council_context(deps, INSTR, asked_by=42, today=date(2026, 7, 12))
+    assert ctx.memory_note is None
     assert [n.headline for n in ctx.news_facts] == ["факт"]
     assert [n.headline for n in ctx.crowd_posts] == ["мнение"]
     assert ctx.tech is None                       # 1 свеча < MIN_CANDLES

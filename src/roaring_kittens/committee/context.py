@@ -11,6 +11,7 @@ from roaring_kittens.broker.position_note import (
 from roaring_kittens.broker.tech import (
     Indicators, TechSummary, compute_indicators, compute_tech_summary,
 )
+from roaring_kittens.committee.memory import build_memory_note
 from roaring_kittens.db.calls import get_last_call
 from roaring_kittens.db.owner import fetch_owner_id
 from roaring_kittens.news.models import NewsItem
@@ -35,10 +36,12 @@ class CouncilContext:
     position_note: str | None          # None => спрашивал не владелец
     position_weight_pct: Decimal | None
     prev_call_note: str | None
+    memory_note: str | None = None
 
 
 async def build_council_context(deps, instrument: Instrument, asked_by: int,
-                                today: date) -> CouncilContext:
+                                today: date,
+                                include_memory: bool = True) -> CouncilContext:
     candles = await deps.broker.get_daily_candles(instrument.figi, days=CANDLES_DAYS)
     tech = compute_tech_summary(candles)
     indicators = compute_indicators(candles)
@@ -74,8 +77,14 @@ async def build_council_context(deps, instrument: Instrument, asked_by: int,
         prev_note = (f"Прошлый разбор бота ({days} дн назад): "
                      f"{prev.stance} {round(prev.confidence * 100)}%")
 
+    memory_note = None
+    if include_memory:  # авто-тезис (position-sync) память не использует — не тратим вызовы
+        situation = f"{tech.as_text() if tech else 'нет техники'}; " + \
+                    "; ".join(n.headline for n in facts[:5])
+        memory_note = await build_memory_note(deps, instrument.ticker, situation)
+
     return CouncilContext(ticker=instrument.ticker, tech=tech, indicators=indicators,
                           news_facts=facts, crowd_posts=crowd,
                           dividend_summary=dividend_summary,
                           position_note=position_note, position_weight_pct=weight,
-                          prev_call_note=prev_note)
+                          prev_call_note=prev_note, memory_note=memory_note)

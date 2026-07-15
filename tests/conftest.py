@@ -39,4 +39,36 @@ def council_ctx():
         indicators=Indicators(rsi14=Decimal("43.2"), ma20=None, ma50=None,
                               volume_ratio=None),
         news_facts=[], crowd_posts=[], dividend_summary="Дивиденды: нет данных.",
-        position_note=None, position_weight_pct=None, prev_call_note=None)
+        position_note=None, position_weight_pct=None, prev_call_note=None,
+        memory_note=None)
+
+
+@pytest.fixture
+def scripted_council_llm():
+    """LLM-сценарий комитета: bear сдаётся на 2-м раунде, PM=wait, Risk=approved."""
+    from roaring_kittens.committee.schemas import (
+        DebateTurn, Proposal, RiskReview, SpecialistView,
+    )
+
+    class ScriptedLLM:
+        def __init__(self):
+            self.ops = []
+            self.bear_turns = 0
+
+        async def parse(self, *, model, operation, messages, schema, temperature=None):
+            self.ops.append(operation)
+            if operation.startswith("council_debate_bull"):
+                return DebateTurn(argument="за", rebuttal_of="-", position_after="bullish")
+            if operation.startswith("council_debate_bear"):
+                self.bear_turns += 1
+                pos = "bearish" if self.bear_turns == 1 else "bullish"
+                return DebateTurn(argument="против", rebuttal_of="-", position_after=pos)
+            if operation == "council_manager":
+                return Proposal(action="wait", stance="neutral", rationale="r",
+                                thesis="t", invalidation="i", confidence=0.55)
+            if operation == "council_risk":
+                return RiskReview(approved=True, veto_reason=None, notes=[])
+            return SpecialistView(role="news", stance="neutral", summary="s",
+                                  key_points=["k"], confidence=0.5)
+
+    return ScriptedLLM()
