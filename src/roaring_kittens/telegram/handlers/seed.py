@@ -60,12 +60,19 @@ async def cmd_seed_retro(message: Message, deps: Deps) -> None:
             except Exception as exc:
                 log.error("seed_analyst_failed", ticker=pos.ticker, error=str(exc))
                 continue
+            embedding = None
+            try:
+                embedding = await deps.embedder.embed(
+                    f"{pos.ticker} {report.stance}: {report.summary}",
+                    operation="embed_call")
+            except Exception as exc:
+                log.warning("embed_call_failed", error=str(exc))
             async with deps.session_factory() as session:
                 await save_call(session, asked_by=owner_id, ticker=pos.ticker,
                                 figi=pos.figi, source="retro", question=None,
                                 stance=report.stance, confidence=report.confidence,
                                 summary=report.summary, price_at_call=tech.last_close,
-                                news_urls=[], created_at=as_of)
+                                news_urls=[], created_at=as_of, embedding=embedding)
                 await session.commit()
             seeded += 1
     scored = await score_due_calls(deps)

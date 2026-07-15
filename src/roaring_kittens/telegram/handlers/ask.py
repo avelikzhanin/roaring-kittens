@@ -103,6 +103,13 @@ async def _analyze_and_edit(progress: Message, deps: Deps, instrument: Instrumen
         )
         return
 
+    embedding = None
+    try:
+        embedding = await deps.embedder.embed(
+            f"{instrument.ticker} {report.stance}: {report.summary}",
+            operation="embed_call")
+    except Exception as exc:
+        log.warning("embed_call_failed", error=str(exc))
     try:  # запись вызова не должна ронять ответ пользователю
         async with deps.session_factory() as session:
             await save_call(session, asked_by=asked_by, ticker=instrument.ticker,
@@ -110,7 +117,7 @@ async def _analyze_and_edit(progress: Message, deps: Deps, instrument: Instrumen
                             stance=report.stance, confidence=report.confidence,
                             summary=report.summary,
                             price_at_call=tech.last_close if tech else None,
-                            news_urls=[n.url for n in news])
+                            news_urls=[n.url for n in news], embedding=embedding)
             await session.commit()
     except Exception as exc:
         log.error("save_call_failed", ticker=instrument.ticker, error=str(exc))

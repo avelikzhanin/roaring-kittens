@@ -52,6 +52,13 @@ async def build_spotlight(deps: Deps, position: Position, asked_by: int) -> str 
     except Exception as exc:
         log.error("spotlight_failed", ticker=position.ticker, error=str(exc))
         return None
+    embedding = None
+    try:
+        embedding = await deps.embedder.embed(
+            f"{position.ticker} {report.stance}: {report.summary}",
+            operation="embed_call")
+    except Exception as exc:
+        log.warning("embed_call_failed", error=str(exc))
     try:  # запись вызова не должна ронять дайджест
         async with deps.session_factory() as session:
             await save_call(session, asked_by=asked_by, ticker=position.ticker,
@@ -59,7 +66,7 @@ async def build_spotlight(deps: Deps, position: Position, asked_by: int) -> str 
                             stance=report.stance, confidence=report.confidence,
                             summary=report.summary,
                             price_at_call=tech.last_close if tech else None,
-                            news_urls=[])
+                            news_urls=[], embedding=embedding)
             await session.commit()
     except Exception as exc:
         log.error("save_call_failed", ticker=position.ticker, error=str(exc))
