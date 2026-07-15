@@ -36,6 +36,7 @@ class ScoredCall:
     stock_return_pct: Decimal
     imoex_return_pct: Decimal
     verdict: str
+    scored_at: datetime | None = None
 
     @property
     def excess_pp(self) -> Decimal:
@@ -99,7 +100,8 @@ async def get_scored_calls(session: AsyncSession) -> list[ScoredCall]:
     rows = (await session.execute(
         select(calls.c.ticker, calls.c.stance, calls.c.created_at, calls.c.source,
                call_scores.c.horizon_days, call_scores.c.stock_return_pct,
-               call_scores.c.imoex_return_pct, call_scores.c.verdict)
+               call_scores.c.imoex_return_pct, call_scores.c.verdict,
+               call_scores.c.scored_at)
         .select_from(j))).fetchall()
     return [ScoredCall(*r) for r in rows]
 
