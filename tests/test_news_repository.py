@@ -23,11 +23,11 @@ async def test_save_dedupes_by_url(db_session_factory):
     async with db_session_factory() as session:
         inserted = await save_news(session, items)
         await session.commit()
-    assert inserted == 1
+    assert inserted == ["https://x/1"]  # возвращаются url'ы реально вставленных
     async with db_session_factory() as session:
         again = await save_news(session, [_item("https://x/1")])
         await session.commit()
-    assert again == 0
+    assert again == []
 
 
 async def test_query_by_ticker_and_window(db_session_factory):

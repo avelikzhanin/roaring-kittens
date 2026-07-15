@@ -52,7 +52,7 @@ async def run() -> None:
 
     scheduler = build_scheduler(deps, bot)
     scheduler.start()
-    await poll_news(deps)  # первый прогон сразу при старте, чтобы БД не была пустой
+    await poll_news(deps, bot)  # первый прогон сразу при старте, чтобы БД не была пустой
 
     log.info("bot_starting", owner_env=settings.admin_telegram_id)
     await dp.start_polling(bot)

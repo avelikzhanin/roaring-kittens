@@ -8,13 +8,13 @@ from roaring_kittens.db.tables import news_events
 from roaring_kittens.news.models import NewsItem
 
 
-async def save_news(session: AsyncSession, items: list[NewsItem]) -> int:
-    """Вставка с дедупом по url. Возвращает число реально вставленных.
+async def save_news(session: AsyncSession, items: list[NewsItem]) -> list[str]:
+    """Вставка с дедупом по url. Возвращает url'ы РЕАЛЬНО вставленных строк.
 
     Дедуп идёт в два слоя: в Python (на случай дублей внутри одной пачки, где
     ON CONFLICT внутри одного INSERT ненадёжен) и в БД (против уже сохранённых)."""
     if not items:
-        return 0
+        return []
     seen: set[str] = set()
     rows = []
     for i in items:
@@ -23,9 +23,11 @@ async def save_news(session: AsyncSession, items: list[NewsItem]) -> int:
         seen.add(i.url)
         rows.append(dict(published_at=i.published_at, tickers=i.tickers, source=i.source,
                          headline=i.headline, body=i.body, url=i.url))
-    stmt = insert(news_events).values(rows).on_conflict_do_nothing(index_elements=["url"])
+    stmt = insert(news_events).values(rows) \
+        .on_conflict_do_nothing(index_elements=["url"]) \
+        .returning(news_events.c.url)
     result = await session.execute(stmt)
-    return result.rowcount or 0
+    return [r[0] for r in result.fetchall()]
 
 
 async def get_news_for_tickers(session: AsyncSession, tickers: list[str],
