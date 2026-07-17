@@ -22,6 +22,16 @@ def _fmt_money(v: Decimal) -> str:
     return f"{v.quantize(Decimal('1'), ROUND_HALF_UP):,}".replace(",", " ")
 
 
+def _fmt_qty(v: Decimal) -> str:
+    """Без хвостов Tinkoff-Decimal: 2.00000000 -> 2."""
+    return f"{v.normalize():f}"
+
+
+def _fmt_price(v: Decimal) -> str:
+    """До копеек и без хвостовых нулей: 293.38000000 -> 293.38, 283.90 -> 283.9."""
+    return f"{v.quantize(Decimal('0.01'), ROUND_HALF_UP).normalize():f}"
+
+
 def _fmt_pct(v: Decimal) -> str:
     sign = "+" if v >= 0 else "−"
     return f"{sign}{abs(v)}%"
@@ -43,8 +53,8 @@ def format_portfolio(snap: PortfolioSnapshot) -> str:
     for p in positions:
         arrow = "▲" if p.pnl_pct >= 0 else "▼"
         lines.append(
-            f"{arrow} <b>{p.ticker}</b> · {p.quantity} шт · "
-            f"{p.avg_price} → {p.current_price} ₽ · {_fmt_pct(p.pnl_pct)}"
+            f"{arrow} <b>{p.ticker}</b> · {_fmt_qty(p.quantity)} шт · "
+            f"{_fmt_price(p.avg_price)} → {_fmt_price(p.current_price)} ₽ · {_fmt_pct(p.pnl_pct)}"
         )
     return "\n".join(lines)
 

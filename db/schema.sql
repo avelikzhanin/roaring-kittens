@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS theses (
     close_reason        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_theses_status ON theses (status, ticker);
+ALTER TABLE theses ADD COLUMN IF NOT EXISTS last_weakened_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS insights (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

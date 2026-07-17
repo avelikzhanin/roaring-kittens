@@ -38,6 +38,7 @@ theses = Table(
     Column("entry_price", Numeric),
     Column("realized_return_pct", Numeric),
     Column("close_reason", Text),
+    Column("last_weakened_at", TIMESTAMP(timezone=True)),
 )
 
 insights = Table(

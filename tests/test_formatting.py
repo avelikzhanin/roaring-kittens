@@ -33,6 +33,17 @@ def test_format_empty_portfolio():
     assert "пуст" in text.lower()
 
 
+def test_format_portfolio_strips_decimal_tails():
+    # Tinkoff Decimal приходит с хвостами: 2.00000000 шт, 293.38000000 ₽
+    snap = PortfolioSnapshot(
+        total_value=Decimal("971"),
+        positions=[_pos("SBER", "2.00000000", "293.38000000", "283.90000000", "-3.2")],
+    )
+    text = format_portfolio(snap)
+    assert "2 шт" in text and "2.0000" not in text
+    assert "293.38 →" in text and "283.9 ₽" in text
+
+
 def test_format_portfolio_movers_first_and_arrows():
     snap = PortfolioSnapshot(
         total_value=Decimal("1000000"),

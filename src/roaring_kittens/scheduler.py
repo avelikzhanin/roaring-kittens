@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -6,7 +8,7 @@ from roaring_kittens.committee.runner import run_council_flow
 from roaring_kittens.committee.thesis_check import decide_validation_action, run_thesis_check
 from roaring_kittens.db.calls import council_ran_recently
 from roaring_kittens.db.owner import fetch_owner_id
-from roaring_kittens.db.theses import close_thesis, get_active_theses
+from roaring_kittens.db.theses import close_thesis, get_active_theses, mark_thesis_weakened
 from roaring_kittens.deps import Deps
 from roaring_kittens.digest.morning import run_morning_digest
 from roaring_kittens.news.matching import match_tickers
@@ -43,6 +45,10 @@ async def poll_news(deps: Deps, bot=None) -> None:
             log.error("validate_theses_failed", error=str(exc))
 
 
+GENERIC_NEWS_TICKER_CAP = 3   # пост с 4+ тикерами = обзор рынка, не событие компании
+WEAKENED_COOLDOWN = timedelta(hours=24)
+
+
 async def validate_theses(deps, bot, fresh_items: list) -> None:
     """Проверка активных тезисов ТОЛЬКО реально новыми новостями (без окна — без спама)."""
     if not fresh_items:
@@ -52,6 +58,10 @@ async def validate_theses(deps, bot, fresh_items: list) -> None:
         return
     by_ticker: dict[str, list] = {}
     for item in fresh_items:
+        # обзорные посты («Индекс МБ сегодня»), матчащиеся на пол-универсума,
+        # не считаем событием конкретной компании — тезисы ими не проверяем
+        if len(item.tickers) > GENERIC_NEWS_TICKER_CAP:
+            continue
         for t in item.tickers:
             by_ticker.setdefault(t, []).append(item)
     async with deps.session_factory() as session:
@@ -70,6 +80,14 @@ async def validate_theses(deps, bot, fresh_items: list) -> None:
         if action == "nothing":
             continue
         if action == "notify":
+            if check.status == "weakened":
+                last = thesis.last_weakened_at
+                if last and datetime.now(tz=timezone.utc) - last < WEAKENED_COOLDOWN:
+                    log.info("weakened_suppressed_cooldown", ticker=thesis.ticker)
+                    continue
+                async with deps.session_factory() as session:
+                    await mark_thesis_weakened(session, thesis.id)
+                    await session.commit()
             await bot.send_message(
                 owner_id,
                 f"⚠️ Тезис по <b>{thesis.ticker}</b> "

@@ -5,7 +5,7 @@ import pytest
 
 from roaring_kittens.db.theses import (
     close_thesis, get_active_theses, get_active_thesis, get_recently_closed,
-    get_recently_deleted_tickers, save_thesis, set_thesis_backed,
+    get_recently_deleted_tickers, mark_thesis_weakened, save_thesis, set_thesis_backed,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -68,3 +68,17 @@ async def test_set_thesis_backed(db_session_factory):
         await session.commit()
         active = await get_active_thesis(session, "LKOH")
         assert active.backed_by_position is True
+
+
+async def test_mark_thesis_weakened_sets_cooldown_timestamp(db_session_factory):
+    async with db_session_factory() as session:
+        t = await save_thesis(session, ticker="NVTK", figi="F5", thesis="t",
+                              invalidation="i", source="auto", confidence=0.5,
+                              entry_price=None)
+        await session.commit()
+        assert t.last_weakened_at is None
+    async with db_session_factory() as session:
+        await mark_thesis_weakened(session, t.id)
+        await session.commit()
+        active = await get_active_thesis(session, "NVTK")
+        assert active.last_weakened_at is not None

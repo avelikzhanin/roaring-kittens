@@ -27,6 +27,7 @@ class ThesisRecord:
     realized_return_pct: Decimal | None
     close_reason: str | None
     backed_by_position: bool = False  # False = «идея» без реальной позиции
+    last_weakened_at: datetime | None = None  # для кулдауна «ослаблен»-уведомлений
 
 
 def _row(r) -> ThesisRecord:
@@ -36,7 +37,8 @@ def _row(r) -> ThesisRecord:
                         confidence=r.confidence, entry_price=r.entry_price,
                         realized_return_pct=r.realized_return_pct,
                         close_reason=r.close_reason,
-                        backed_by_position=r.backed_by_position)
+                        backed_by_position=r.backed_by_position,
+                        last_weakened_at=r.last_weakened_at)
 
 
 async def save_thesis(session: AsyncSession, *, ticker: str, figi: str, thesis: str,
@@ -56,6 +58,13 @@ async def save_thesis(session: AsyncSession, *, ticker: str, figi: str, thesis: 
                                backed_by_position=backed_by_position)
         .returning(theses))
     return _row(result.first())
+
+
+async def mark_thesis_weakened(session: AsyncSession, thesis_id: UUIDType) -> None:
+    """Запоминаем момент «ослаблен»-уведомления — для суточного кулдауна."""
+    await session.execute(
+        update(theses).where(theses.c.id == thesis_id)
+        .values(last_weakened_at=datetime.now(tz=timezone.utc)))
 
 
 async def set_thesis_backed(session: AsyncSession, thesis_id: UUIDType) -> None:
