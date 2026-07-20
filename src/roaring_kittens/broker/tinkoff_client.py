@@ -29,6 +29,11 @@ def map_portfolio(raw, figi_map: dict[str, tuple[str, str]]) -> PortfolioSnapsho
     )
 
 
+def map_last_prices(resp) -> dict[str, Decimal]:
+    """Чистая функция: ответ get_last_prices -> figi->цена."""
+    return {p.figi: quotation_to_decimal(p.price) for p in resp.last_prices}
+
+
 class TinkoffBroker:
     def __init__(self, token: str):
         self._token = token
@@ -84,6 +89,14 @@ class TinkoffBroker:
                 )
                 for d in resp.dividends
             ]
+
+    @retry_async(attempts=3, base_delay=1.0)
+    async def get_last_prices(self, figis: list[str]) -> dict[str, Decimal]:
+        if not figis:
+            return {}
+        async with AsyncClient(self._token) as client:
+            resp = await client.market_data.get_last_prices(figi=figis)
+            return map_last_prices(resp)
 
     async def list_shares(self) -> dict[str, tuple[str, str]]:
         """ticker -> (figi, name) для маппинга universe."""
