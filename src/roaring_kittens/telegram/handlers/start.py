@@ -23,6 +23,7 @@ HELP_TEXT = (
     "• <code>/track</code> — послужной список бота (hit-rate vs IMOEX, включая промахи)\n\n"
     "<b>Только для владельца:</b>\n"
     "• <code>/council ТИКЕР</code> — полный разбор комитетом (4 аналитика + дебаты Bull/Bear)\n"
+    "• <code>/watch ТИКЕР</code> — следить: impact-алерты + движение ≥5%\n"
     "• <code>/thesis</code> — активные тезисы · <code>/insights</code> — уроки бота\n"
     "• <code>/history ТИКЕР</code> — прошлые разборы с исходами\n"
     "• <code>/portfolio</code> — портфель и P&amp;L\n"
