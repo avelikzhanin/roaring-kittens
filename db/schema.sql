@@ -87,6 +87,20 @@ CREATE TABLE IF NOT EXISTS council_runs (
     call_id    UUID REFERENCES calls(id)
 );
 
+CREATE TABLE IF NOT EXISTS watchlists (
+    owner_id BIGINT NOT NULL,
+    ticker   VARCHAR(20) NOT NULL,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (owner_id, ticker)
+);
+
+CREATE TABLE IF NOT EXISTS alert_buffer (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    chat_id    BIGINT NOT NULL,
+    payload    TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS bot_state (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,

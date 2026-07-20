@@ -86,6 +86,21 @@ council_runs = Table(
     Column("call_id", UUID(as_uuid=True), ForeignKey("calls.id")),
 )
 
+watchlists = Table(
+    "watchlists", metadata,
+    Column("owner_id", BigInteger, primary_key=True),
+    Column("ticker", String(20), primary_key=True),
+    Column("added_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+)
+
+alert_buffer = Table(
+    "alert_buffer", metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    Column("chat_id", BigInteger, nullable=False),
+    Column("payload", Text, nullable=False),
+)
+
 bot_state = Table(
     "bot_state", metadata,
     Column("key", Text, primary_key=True),
