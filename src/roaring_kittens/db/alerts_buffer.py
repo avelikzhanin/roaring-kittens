@@ -21,3 +21,10 @@ async def delete_alerts(session: AsyncSession, ids: list[int]) -> None:
     if not ids:
         return
     await session.execute(delete(alert_buffer).where(alert_buffer.c.id.in_(ids)))
+
+
+async def list_buffered_chats(session: AsyncSession) -> list[int]:
+    """Чаты с непустым буфером — дренаж покрывает всех (и только что revoked)."""
+    rows = (await session.execute(
+        select(alert_buffer.c.chat_id).distinct())).fetchall()
+    return [r[0] for r in rows]

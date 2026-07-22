@@ -1,22 +1,26 @@
-"""Ежедневная сверка портфеля с тезисами: закрытия и новые крупные позиции."""
+"""Ежедневная сверка портфелей ВСЕХ юзеров с их тезисами: закрытия и новые позиции."""
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 
 import structlog
 
+from roaring_kittens.ai.usage_context import use_budget_mode, use_user
 from roaring_kittens.broker.benchmark import return_between
 from roaring_kittens.broker.models import PortfolioSnapshot, Position
 from roaring_kittens.broker.position_note import position_weight_pct
+from roaring_kittens.budget import budget_state
 from roaring_kittens.committee.context import build_council_context
 from roaring_kittens.committee.thesis_gen import run_thesis_draft
-from roaring_kittens.db.owner import fetch_owner_id
 from roaring_kittens.db.theses import (
     ThesisRecord, close_thesis, get_active_theses, get_recently_deleted_tickers,
     save_thesis, set_thesis_backed,
 )
+from roaring_kittens.db.users import list_active_users
 from roaring_kittens.telegram.formatting import esc
 from roaring_kittens.universe.universe import Instrument
+from roaring_kittens.users_service import get_cached_portfolio, get_user_broker
 
 log = structlog.get_logger()
 
@@ -59,18 +63,41 @@ async def _realized_return(deps, thesis: ThesisRecord) -> Decimal | None:
 
 
 async def sync_positions(deps, bot) -> None:
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if owner_id is None:
-        return
-    try:
-        snap = await deps.broker.get_portfolio()
-    except Exception as exc:
-        log.error("sync_portfolio_failed", error=str(exc))
+    """Цикл по активным юзерам с брокером; ошибка одного не роняет остальных."""
+    async with deps.session_factory() as session:
+        users = await list_active_users(session)
+    for u in users:
+        broker = await get_user_broker(deps, u.telegram_id)
+        if broker is None:
+            continue
+        started = time.monotonic()
+        try:
+            with use_user(u.telegram_id):
+                await _sync_user(deps, bot, u.telegram_id, broker)
+        except Exception as exc:
+            log.error("sync_user_failed", user=u.telegram_id, error=str(exc))
+        log.info("sync_user_done", user=u.telegram_id,
+                 sec=round(time.monotonic() - started, 1))
+
+
+async def _sync_user(deps, bot, owner_id: int, broker) -> None:
+    # Кэш-портфель: снимок 8:50 переиспользуется дайджестом в 9:00 (один запрос)
+    snap = await get_cached_portfolio(deps, owner_id, broker)
+    if snap is None:
+        log.error("sync_portfolio_failed", user=owner_id)
         return
     async with deps.session_factory() as session:
-        active = await get_active_theses(session)
-        suppressed = await get_recently_deleted_tickers(session, days=30)
+        active = await get_active_theses(session, owner_id=owner_id)
+        suppressed = await get_recently_deleted_tickers(session, days=30,
+                                                        owner_id=owner_id)
     actions = diff_positions(snap, active, suppressed=suppressed)
+    # Бюджет: blocked — авто-тезисы (LLM) не генерим; econom — драфты на mini
+    state, _, _ = await budget_state(deps, owner_id)
+    if state == "blocked" and actions.to_draft:
+        log.info("thesis_drafts_skipped_budget", user=owner_id,
+                 skipped=len(actions.to_draft))
+        actions = SyncActions(to_close=actions.to_close, to_draft=[],
+                              to_back=actions.to_back)
 
     for thesis in actions.to_back:  # идея подтвердилась покупкой
         async with deps.session_factory() as session:
@@ -96,8 +123,9 @@ async def sync_positions(deps, bot) -> None:
         try:
             ctx = await build_council_context(deps, instrument, owner_id,
                                               today=datetime.now(tz=timezone.utc).date(),
-                                              include_memory=False)
-            draft = await run_thesis_draft(deps.llm, ctx)
+                                              include_memory=False, broker=broker)
+            with use_budget_mode("econom" if state == "econom" else "ok"):
+                draft = await run_thesis_draft(deps.llm, ctx)
         except Exception as exc:
             log.error("thesis_draft_failed", ticker=pos.ticker, error=str(exc))
             continue

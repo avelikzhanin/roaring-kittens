@@ -14,11 +14,12 @@ def test_significant_move_threshold():
 def test_deduper_seen_mark_and_purge():
     d = DayMoveDeduper()
     today, tomorrow = date(2026, 7, 18), date(2026, 7, 19)
-    assert d.seen("SBER", today) is False   # проверка без пометки
-    assert d.seen("SBER", today) is False   # повторная проверка не пометила
-    d.mark("SBER", today)                    # пометка только после успешной отправки
-    assert d.seen("SBER", today) is True
-    assert d.seen("GAZP", today) is False
-    assert d.seen("SBER", tomorrow) is False  # новый день — можно снова
-    d.purge(tomorrow)                         # вчерашние ключи выброшены
-    assert d.seen("SBER", today) is False
+    assert d.seen(42, "SBER", today) is False   # проверка без пометки
+    assert d.seen(42, "SBER", today) is False   # повторная проверка не пометила
+    d.mark(42, "SBER", today)                    # пометка только после успешной отправки
+    assert d.seen(42, "SBER", today) is True
+    assert d.seen(777, "SBER", today) is False   # у другого юзера свой дедуп
+    assert d.seen(42, "GAZP", today) is False
+    assert d.seen(42, "SBER", tomorrow) is False  # новый день — можно снова
+    d.purge(tomorrow)                             # вчерашние ключи выброшены
+    assert d.seen(42, "SBER", today) is False

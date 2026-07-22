@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import structlog
 from pydantic import BaseModel, Field
 
+from roaring_kittens.ai.usage_context import use_user
 from roaring_kittens.db.calls import ScoredCall, get_scored_calls
 from roaring_kittens.db.insights import save_insight
 from roaring_kittens.db.owner import fetch_owner_id
@@ -70,11 +71,13 @@ async def weekly_reflection_job(deps, bot) -> None:
         return
     week_ago = datetime.now(tz=timezone.utc) - timedelta(days=7)
     async with deps.session_factory() as session:
-        closed = await get_recently_closed(session, days=7)  # только реальные исходы
+        # admin-scoped (решение 3 плана 4b): уроки — из закрытых тезисов владельца
+        closed = await get_recently_closed(session, days=7, owner_id=owner_id)
         scored = [s for s in await get_scored_calls(session)
                   if s.scored_at and s.scored_at >= week_ago
                   and s.horizon_days == 20]  # один горизонт — без дублей
-    result = await run_reflection(deps.llm, closed, scored)
+    with use_user(owner_id):
+        result = await run_reflection(deps.llm, closed, scored)
     if result is None:
         log.info("reflection_skipped_no_material")
         return

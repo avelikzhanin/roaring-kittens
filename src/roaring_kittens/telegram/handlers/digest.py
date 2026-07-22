@@ -2,6 +2,8 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from roaring_kittens.ai.usage_context import use_budget_mode, use_user
+from roaring_kittens.budget import budget_state
 from roaring_kittens.deps import Deps
 from roaring_kittens.digest.morning import run_morning_digest
 from roaring_kittens.users_service import get_user_broker
@@ -21,4 +23,9 @@ async def cmd_digest(message: Message, deps: Deps) -> None:
         await message.answer(NO_BROKER)
         return
     await message.answer("⏳ Собираю дайджест…")
-    await run_morning_digest(deps, message.bot, message.chat.id, broker=broker)
+    uid = message.from_user.id
+    state, _, _ = await budget_state(deps, uid)
+    mode = "econom" if state in ("econom", "blocked") else "ok"
+    with use_user(uid), use_budget_mode(mode):
+        await run_morning_digest(deps, message.bot, message.chat.id, broker=broker,
+                                 allow_spotlight=state != "blocked")

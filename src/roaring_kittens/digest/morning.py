@@ -74,10 +74,16 @@ async def build_spotlight(deps: Deps, position: Position, asked_by: int) -> str 
     return f"🔎 <b>Разбор дня — {position.ticker}</b> {emoji}\n{report.summary}"
 
 
-async def run_morning_digest(deps: Deps, bot, chat_id: int, broker=None) -> None:
-    """broker — брокер получателя; None = системный (обратная совместимость)."""
+async def run_morning_digest(deps: Deps, bot, chat_id: int, broker=None,
+                             allow_spotlight: bool = True) -> None:
+    """broker — брокер получателя; None = системный (обратная совместимость).
+    allow_spotlight=False — бюджет исчерпан: тихое утро без LLM-разбора дня."""
+    from roaring_kittens.users_service import get_cached_portfolio
     broker = broker or deps.broker
-    snap = await broker.get_portfolio()
+    # кэш: снимок positions_sync (8:50) переиспользуется в 9:00 — один Tinkoff-запрос
+    snap = await get_cached_portfolio(deps, chat_id, broker)
+    if snap is None:
+        snap = await broker.get_portfolio()
     tickers = [p.ticker for p in snap.positions]
     since = datetime.now(tz=timezone.utc) - timedelta(hours=16)
     news_by_ticker: dict[str, list[NewsItem]] = {}
@@ -109,7 +115,7 @@ async def run_morning_digest(deps: Deps, bot, chat_id: int, broker=None) -> None
     text = build_digest_text(snap, news_by_ticker, ai_summary)
 
     # Тихое утро: новостей нет, но дайджест не должен быть пустым — даём разбор дня по ротации.
-    if not news_by_ticker and snap.positions:
+    if not news_by_ticker and snap.positions and allow_spotlight:
         idx = datetime.now(tz=timezone.utc).timetuple().tm_yday % len(snap.positions)
         spotlight = await build_spotlight(deps, snap.positions[idx], asked_by=chat_id)
         if spotlight:
