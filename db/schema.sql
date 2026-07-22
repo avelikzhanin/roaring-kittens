@@ -101,6 +101,26 @@ CREATE TABLE IF NOT EXISTS alert_buffer (
     payload    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS users (
+    telegram_id        BIGINT PRIMARY KEY,
+    username           VARCHAR(64),
+    role               VARCHAR(20) NOT NULL DEFAULT 'user',    -- 'admin' | 'user'
+    status             VARCHAR(20) NOT NULL DEFAULT 'active',  -- 'active' | 'revoked'
+    tinkoff_token_enc  BYTEA,                                  -- NULL: admin=env-токен, user=без портфеля
+    monthly_budget_usd NUMERIC(8,2) NOT NULL DEFAULT 20,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS invites (
+    code        VARCHAR(24) PRIMARY KEY,  -- INV- + 16 hex (2^64: брутфорс невозможен)
+    created_by  BIGINT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ NOT NULL,
+    redeemed_by BIGINT
+);
+
+ALTER TABLE theses ADD COLUMN IF NOT EXISTS owner_id BIGINT;
+
 CREATE TABLE IF NOT EXISTS bot_state (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,
@@ -117,3 +137,4 @@ CREATE TABLE IF NOT EXISTS usage_log (
     cost_usd      NUMERIC(10,6) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log (timestamp DESC);
+ALTER TABLE usage_log ADD COLUMN IF NOT EXISTS user_id BIGINT;

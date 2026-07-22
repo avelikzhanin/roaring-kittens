@@ -1,6 +1,7 @@
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (TIMESTAMP, BigInteger, Boolean, Column, Float, ForeignKey,
-                        Integer, MetaData, Numeric, String, Table, Text, text)
+                        Integer, LargeBinary, MetaData, Numeric, String, Table, Text,
+                        text)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 
 metadata = MetaData()
@@ -39,6 +40,7 @@ theses = Table(
     Column("realized_return_pct", Numeric),
     Column("close_reason", Text),
     Column("last_weakened_at", TIMESTAMP(timezone=True)),
+    Column("owner_id", BigInteger),  # последней: ALTER TABLE добавляет в конец
 )
 
 insights = Table(
@@ -101,6 +103,26 @@ alert_buffer = Table(
     Column("payload", Text, nullable=False),
 )
 
+users = Table(
+    "users", metadata,
+    Column("telegram_id", BigInteger, primary_key=True),
+    Column("username", String(64)),
+    Column("role", String(20), nullable=False, server_default=text("'user'")),
+    Column("status", String(20), nullable=False, server_default=text("'active'")),
+    Column("tinkoff_token_enc", LargeBinary),
+    Column("monthly_budget_usd", Numeric(8, 2), nullable=False, server_default=text("20")),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+)
+
+invites = Table(
+    "invites", metadata,
+    Column("code", String(24), primary_key=True),
+    Column("created_by", BigInteger, nullable=False),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    Column("expires_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("redeemed_by", BigInteger),
+)
+
 bot_state = Table(
     "bot_state", metadata,
     Column("key", Text, primary_key=True),
@@ -117,4 +139,5 @@ usage_log = Table(
     Column("input_tokens", Integer, nullable=False),
     Column("output_tokens", Integer, nullable=False),
     Column("cost_usd", Numeric(10, 6), nullable=False),
+    Column("user_id", BigInteger),  # последней: ALTER TABLE добавляет в конец
 )
