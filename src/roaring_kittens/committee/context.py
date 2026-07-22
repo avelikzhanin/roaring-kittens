@@ -13,7 +13,6 @@ from roaring_kittens.broker.tech import (
 )
 from roaring_kittens.committee.memory import build_memory_note
 from roaring_kittens.db.calls import get_last_call
-from roaring_kittens.db.owner import fetch_owner_id
 from roaring_kittens.news.models import NewsItem
 from roaring_kittens.news.repository import get_news_for_tickers
 from roaring_kittens.universe.universe import Instrument
@@ -33,7 +32,7 @@ class CouncilContext:
     news_facts: list[NewsItem]
     crowd_posts: list[NewsItem]
     dividend_summary: str
-    position_note: str | None          # None => спрашивал не владелец
+    position_note: str | None          # None => у спрашивающего нет своего брокера
     position_weight_pct: Decimal | None
     prev_call_note: str | None
     memory_note: str | None = None
@@ -41,7 +40,10 @@ class CouncilContext:
 
 async def build_council_context(deps, instrument: Instrument, asked_by: int,
                                 today: date,
-                                include_memory: bool = True) -> CouncilContext:
+                                include_memory: bool = True,
+                                broker=None) -> CouncilContext:
+    """broker — брокер СПРАШИВАЮЩЕГО (None => без блока позиции).
+    Market data (свечи/дивиденды) всегда с системного deps.broker."""
     candles = await deps.broker.get_daily_candles(instrument.figi, days=CANDLES_DAYS)
     tech = compute_tech_summary(candles)
     indicators = compute_indicators(candles)
@@ -62,10 +64,9 @@ async def build_council_context(deps, instrument: Instrument, asked_by: int,
         divs, tech.last_close if tech else None, today=today)
 
     position_note, weight = None, None
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if asked_by == owner_id:
+    if broker is not None:
         try:
-            snap = await deps.broker.get_portfolio()
+            snap = await broker.get_portfolio()
             position_note = position_note_from_snapshot(snap, instrument.ticker)
             weight = position_weight_pct(snap, instrument.ticker)
         except Exception as exc:
@@ -81,7 +82,8 @@ async def build_council_context(deps, instrument: Instrument, asked_by: int,
     if include_memory:  # авто-тезис (position-sync) память не использует — не тратим вызовы
         situation = f"{tech.as_text() if tech else 'нет техники'}; " + \
                     "; ".join(n.headline for n in facts[:5])
-        memory_note = await build_memory_note(deps, instrument.ticker, situation)
+        memory_note = await build_memory_note(deps, instrument.ticker, situation,
+                                              asked_by=asked_by)
 
     return CouncilContext(ticker=instrument.ticker, tech=tech, indicators=indicators,
                           news_facts=facts, crowd_posts=crowd,

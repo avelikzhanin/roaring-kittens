@@ -153,13 +153,17 @@ def _calls_with_score20():
 
 
 async def find_similar_calls(session: AsyncSession, embedding: list[float],
-                             k: int = 3) -> list[SimilarCall]:
-    rows = (await session.execute(
-        select(calls, call_scores.c.horizon_days, call_scores.c.stock_return_pct,
-               call_scores.c.imoex_return_pct, call_scores.c.verdict)
-        .select_from(_calls_with_score20())
+                             k: int = 3, *,
+                             asked_by: int | None = None) -> list[SimilarCall]:
+    """asked_by: память = СВОЙ прошлый опыт (council-summary может содержать позицию)."""
+    stmt = select(calls, call_scores.c.horizon_days, call_scores.c.stock_return_pct,
+                  call_scores.c.imoex_return_pct, call_scores.c.verdict) \
+        .select_from(_calls_with_score20()) \
         .where(calls.c.embedding.isnot(None))
-        .order_by(calls.c.embedding.cosine_distance(embedding))
+    if asked_by is not None:
+        stmt = stmt.where(calls.c.asked_by == asked_by)
+    rows = (await session.execute(
+        stmt.order_by(calls.c.embedding.cosine_distance(embedding))
         .limit(k))).fetchall()
     out = []
     for r in rows:
@@ -182,13 +186,16 @@ async def council_ran_recently(session: AsyncSession, ticker: str,
 
 
 async def get_ticker_history(session: AsyncSession, ticker: str,
-                             limit: int = 5) -> list[HistoryItem]:
-    rows = (await session.execute(
-        select(calls, call_scores.c.horizon_days, call_scores.c.stock_return_pct,
-               call_scores.c.imoex_return_pct, call_scores.c.verdict)
-        .select_from(_calls_with_score20())
+                             limit: int = 5, *,
+                             asked_by: int | None = None) -> list[HistoryItem]:
+    stmt = select(calls, call_scores.c.horizon_days, call_scores.c.stock_return_pct,
+                  call_scores.c.imoex_return_pct, call_scores.c.verdict) \
+        .select_from(_calls_with_score20()) \
         .where(calls.c.ticker == ticker)
-        .order_by(calls.c.created_at.desc())
+    if asked_by is not None:
+        stmt = stmt.where(calls.c.asked_by == asked_by)
+    rows = (await session.execute(
+        stmt.order_by(calls.c.created_at.desc())
         .limit(limit))).fetchall()
     return [HistoryItem(created_at=r.created_at, source=r.source, stance=r.stance,
                         confidence=r.confidence, summary=r.summary,

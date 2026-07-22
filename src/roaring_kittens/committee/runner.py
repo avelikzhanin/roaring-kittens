@@ -82,10 +82,11 @@ async def _persist_council(deps, instrument: Instrument, asked_by: int,
 
 async def run_council_flow(deps, instrument: Instrument, asked_by: int,
                            ctx: CouncilContext | None = None,
-                           on_stage: OnStage | None = None) -> CouncilOutcome:
+                           on_stage: OnStage | None = None,
+                           broker=None) -> CouncilOutcome:
     if ctx is None:
         ctx = await build_council_context(deps, instrument, asked_by,
-                                          today=date.today())
+                                          today=date.today(), broker=broker)
     graph = build_council_graph(deps.llm)
     state: dict = {"ctx": ctx}
     async for chunk in graph.astream(state, stream_mode="updates"):

@@ -38,8 +38,10 @@ def _similar(ticker, verdict=None):
 
 
 async def test_memory_note_contains_similar_and_insights(monkeypatch):
-    async def fake_similar(session, emb, k=3):
+    async def fake_similar(session, emb, k=3, asked_by=None):
+        fake_similar.asked_by = asked_by
         return [_similar("GAZP", "hit")]
+    fake_similar.asked_by = "unset"
 
     async def fake_insights(session, emb, k=3, min_confidence=0.5):
         return [InsightRecord(id=uuid4(), created_at=NOW, summary="банки под дивы работают",
@@ -55,7 +57,8 @@ async def test_memory_note_contains_similar_and_insights(monkeypatch):
     monkeypatch.setattr(mem_mod, "bump_times_applied", fake_bump)
     deps = SimpleNamespace(embedder=FakeEmbedder(), session_factory=lambda: FakeSession())
 
-    note = await build_memory_note(deps, "SBER", "SBER: рост на объёме")
+    note = await build_memory_note(deps, "SBER", "SBER: рост на объёме", asked_by=42)
+    assert fake_similar.asked_by == 42  # память скоупится по инициатору
     assert "GAZP" in note and "hit" in note
     assert "банки под дивы" in note
     assert len(note) <= MEMORY_CHAR_CAP
@@ -63,7 +66,7 @@ async def test_memory_note_contains_similar_and_insights(monkeypatch):
 
 
 async def test_memory_note_none_when_empty(monkeypatch):
-    async def none_similar(session, emb, k=3):
+    async def none_similar(session, emb, k=3, asked_by=None):
         return []
 
     async def none_insights(session, emb, k=3, min_confidence=0.5):

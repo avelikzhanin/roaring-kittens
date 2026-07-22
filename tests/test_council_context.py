@@ -43,24 +43,27 @@ async def test_build_context_splits_news_and_survives_empty_account(monkeypatch)
     async def fake_last_call(session, ticker, within_days=7):
         return None
 
-    async def fake_owner(session_factory):
-        return 42
-
-    async def fake_memory(deps, ticker, situation):
+    async def fake_memory(deps, ticker, situation, asked_by=None):
         return None
 
     monkeypatch.setattr(ctx_mod, "get_news_for_tickers", fake_news)
     monkeypatch.setattr(ctx_mod, "get_last_call", fake_last_call)
-    monkeypatch.setattr(ctx_mod, "fetch_owner_id", fake_owner)
     monkeypatch.setattr(ctx_mod, "build_memory_note", fake_memory)
-    deps = SimpleNamespace(broker=FakeBroker(), session_factory=lambda: FakeSession())
+    broker = FakeBroker()
+    deps = SimpleNamespace(broker=broker, session_factory=lambda: FakeSession())
 
-    ctx = await build_council_context(deps, INSTR, asked_by=42, today=date(2026, 7, 12))
+    ctx = await build_council_context(deps, INSTR, asked_by=42, today=date(2026, 7, 12),
+                                      broker=broker)
     assert ctx.memory_note is None
     assert [n.headline for n in ctx.news_facts] == ["факт"]
     assert [n.headline for n in ctx.crowd_posts] == ["мнение"]
     assert ctx.tech is None                       # 1 свеча < MIN_CANDLES
     assert ctx.position_weight_pct is None        # пустой счёт
-    assert "НЕТ" in ctx.position_note             # владелец, но бумаги нет
+    assert "НЕТ" in ctx.position_note             # свой брокер, но бумаги нет
     assert "не выплачивались" in ctx.dividend_summary
     assert ctx.prev_call_note is None
+
+    # без своего брокера позиция не подмешивается вовсе
+    ctx_guest = await build_council_context(deps, INSTR, asked_by=99,
+                                            today=date(2026, 7, 12))
+    assert ctx_guest.position_note is None

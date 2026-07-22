@@ -9,7 +9,10 @@ log = structlog.get_logger()
 MEMORY_CHAR_CAP = 4000  # ~1000-1500 токенов
 
 
-async def build_memory_note(deps, ticker: str, situation_text: str) -> str | None:
+async def build_memory_note(deps, ticker: str, situation_text: str, *,
+                            asked_by: int | None = None) -> str | None:
+    """asked_by скоупит похожие разборы: council-summary (=PM rationale) видел
+    позицию инициатора — в чужие промпты его нельзя."""
     try:
         emb = await deps.embedder.embed(f"{ticker}: {situation_text}",
                                         operation="memory_query")
@@ -17,7 +20,7 @@ async def build_memory_note(deps, ticker: str, situation_text: str) -> str | Non
         log.warning("memory_embed_failed", error=str(exc))
         return None
     async with deps.session_factory() as session:
-        similar = await find_similar_calls(session, emb, k=3)
+        similar = await find_similar_calls(session, emb, k=3, asked_by=asked_by)
         applicable = await top_insights_by_similarity(session, emb, k=3,
                                                       min_confidence=0.5)
         if applicable:

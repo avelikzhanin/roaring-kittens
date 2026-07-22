@@ -74,8 +74,10 @@ async def build_spotlight(deps: Deps, position: Position, asked_by: int) -> str 
     return f"🔎 <b>Разбор дня — {position.ticker}</b> {emoji}\n{report.summary}"
 
 
-async def run_morning_digest(deps: Deps, bot, chat_id: int) -> None:
-    snap = await deps.broker.get_portfolio()
+async def run_morning_digest(deps: Deps, bot, chat_id: int, broker=None) -> None:
+    """broker — брокер получателя; None = системный (обратная совместимость)."""
+    broker = broker or deps.broker
+    snap = await broker.get_portfolio()
     tickers = [p.ticker for p in snap.positions]
     since = datetime.now(tz=timezone.utc) - timedelta(hours=16)
     news_by_ticker: dict[str, list[NewsItem]] = {}

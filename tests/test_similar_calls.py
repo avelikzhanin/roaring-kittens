@@ -21,10 +21,10 @@ def _vec(direction: int) -> list[float]:
 
 
 async def _save(session, *, ticker="SBER", stance="bullish", embedding=None,
-                source="ask", created_at=None):
+                source="ask", created_at=None, asked_by=1):
     return await save_call(
-        session, asked_by=1, ticker=ticker, figi="F", source=source, question=None,
-        stance=stance, confidence=0.6, summary=f"{ticker} разбор",
+        session, asked_by=asked_by, ticker=ticker, figi="F", source=source,
+        question=None, stance=stance, confidence=0.6, summary=f"{ticker} разбор",
         price_at_call=Decimal("100"), news_urls=[], created_at=created_at,
         embedding=embedding)
 
@@ -54,3 +54,17 @@ async def test_council_ran_recently_and_history(db_session_factory):
         assert await council_ran_recently(session, "GAZP", hours=24) is False
         history = await get_ticker_history(session, "SBER", limit=5)
         assert len(history) == 2 and history[0].source == "council"  # свежие первыми
+
+
+async def test_memory_and_history_scoped_by_asked_by(db_session_factory):
+    """Council-summary видел позицию инициатора — в чужую память/историю нельзя."""
+    async with db_session_factory() as session:
+        await _save(session, ticker="GAZP", embedding=_vec(0), asked_by=42,
+                    source="council")
+        await _save(session, ticker="LKOH", embedding=_vec(0), asked_by=777)
+        await session.commit()
+    async with db_session_factory() as session:
+        mine = await find_similar_calls(session, _vec(0), k=5, asked_by=42)
+        assert [s.ticker for s in mine] == ["GAZP"]
+        history = await get_ticker_history(session, "LKOH", limit=5, asked_by=42)
+        assert history == []  # чужой разбор не виден
