@@ -4,12 +4,16 @@ import structlog
 from pydantic import BaseModel
 
 from roaring_kittens.ai.pricing import estimate_cost
+from roaring_kittens.ai.usage_context import budget_mode, current_user_id
 from roaring_kittens.utils.retry import retry_async
 
 log = structlog.get_logger()
 T = TypeVar("T", bound=BaseModel)
 
-UsageLogger = Callable[..., Awaitable[None]]  # (operation, model, input_tokens, output_tokens, cost_usd)
+UsageLogger = Callable[..., Awaitable[None]]  # (operation, model, input_tokens, output_tokens, cost_usd, user_id=None)
+
+# 80% бюджета: тяжёлые модели подменяются на дешёвые; o4-mini/mini не трогаем
+ECONOM_MODEL_MAP = {"gpt-4o": "gpt-4o-mini", "gpt-4.1": "gpt-4o-mini"}
 
 
 class LLM:
@@ -30,13 +34,16 @@ class LLM:
     async def parse(self, *, model: str, operation: str,
                     messages: list[dict], schema: type[T],
                     temperature: float | None = None) -> T:
+        if budget_mode.get() == "econom":
+            model = ECONOM_MODEL_MAP.get(model, model)
         kwargs: dict[str, Any] = dict(model=model, messages=messages, response_format=schema)
         if temperature is not None:
             kwargs["temperature"] = temperature  # reasoning-модели (o-серия) не принимают — не передаём
         resp = await self._parse_fn()(**kwargs)
         u = resp.usage
         cost = estimate_cost(model, u.prompt_tokens, u.completion_tokens)
-        await self._log_usage(operation, model, u.prompt_tokens, u.completion_tokens, cost)
+        await self._log_usage(operation, model, u.prompt_tokens, u.completion_tokens,
+                              cost, user_id=current_user_id.get())
         log.info("llm_call", operation=operation, model=model,
                  input=u.prompt_tokens, output=u.completion_tokens, cost=round(cost, 5))
         return resp.choices[0].message.parsed
@@ -45,11 +52,12 @@ class LLM:
 def make_db_usage_logger(session_factory) -> UsageLogger:
     from roaring_kittens.db.tables import usage_log
 
-    async def _log(operation, model, input_tokens, output_tokens, cost_usd):
+    async def _log(operation, model, input_tokens, output_tokens, cost_usd,
+                   user_id=None):
         async with session_factory() as session:
             await session.execute(usage_log.insert().values(
                 operation=operation, model=model, input_tokens=input_tokens,
-                output_tokens=output_tokens, cost_usd=cost_usd,
+                output_tokens=output_tokens, cost_usd=cost_usd, user_id=user_id,
             ))
             await session.commit()
 

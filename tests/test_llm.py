@@ -26,7 +26,8 @@ async def test_parse_returns_schema_and_logs_usage():
     )
     logged = []
 
-    async def fake_log(operation, model, input_tokens, output_tokens, cost_usd):
+    async def fake_log(operation, model, input_tokens, output_tokens, cost_usd,
+                       user_id=None):
         logged.append((operation, model, input_tokens, output_tokens, cost_usd))
 
     llm = LLM(client=fake_client, usage_logger=fake_log)

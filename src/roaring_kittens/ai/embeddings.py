@@ -3,6 +3,7 @@ from typing import Any
 import structlog
 
 from roaring_kittens.ai.llm import UsageLogger
+from roaring_kittens.ai.usage_context import current_user_id
 from roaring_kittens.utils.retry import retry_async
 
 log = structlog.get_logger()
@@ -24,5 +25,6 @@ class Embedder:
             model=EMBED_MODEL, input=text[:MAX_INPUT_CHARS])
         tokens = resp.usage.prompt_tokens
         await self._log_usage(operation, EMBED_MODEL, tokens, 0,
-                              tokens / 1_000_000 * EMBED_COST_PER_1M)
+                              tokens / 1_000_000 * EMBED_COST_PER_1M,
+                              user_id=current_user_id.get())
         return resp.data[0].embedding
