@@ -37,9 +37,11 @@ async def run_impact_check(llm, ticker: str, news: list[NewsItem]) -> ImpactChec
 
 
 def decide_impact_action(impact: str, council_recent: bool) -> str:
-    """critical — комитет сквозь всё; high — комитет с суточным guard'ом; medium — алерт."""
+    """critical — алерт сквозь всё, но комитет с суточным guard'ом (дубли той же
+    истории из разных источников не должны гонять комитет повторно);
+    high — комитет с guard'ом; medium — алерт."""
     if impact == "critical":
-        return "council_critical"
+        return "notify_critical" if council_recent else "council_critical"
     if impact == "high":
         return "notify" if council_recent else "council"
     if impact == "medium":

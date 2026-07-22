@@ -20,19 +20,33 @@ def is_quiet_hours(now_local: datetime) -> bool:
 
 
 class AlertThrottle:
-    """In-memory скользящее окно: не больше max_per_hour несрочных алертов."""
+    """In-memory скользящее окно: не больше max_per_hour несрочных алертов.
+
+    would_allow/record разделены: слот занимается ПОСЛЕ успешной отправки,
+    чтобы сбой Telegram не сжигал лимит."""
 
     def __init__(self, max_per_hour: int = 3):
         self.max_per_hour = max_per_hour
         self._sent: deque[datetime] = deque()
 
-    def allow(self, now: datetime) -> bool:
+    def _evict(self, now: datetime) -> None:
         hour_ago = now - timedelta(hours=1)
         while self._sent and self._sent[0] <= hour_ago:
             self._sent.popleft()
-        if len(self._sent) >= self.max_per_hour:
-            return False
+
+    def would_allow(self, now: datetime) -> bool:
+        self._evict(now)
+        return len(self._sent) < self.max_per_hour
+
+    def record(self, now: datetime) -> None:
+        self._evict(now)
         self._sent.append(now)
+
+    def allow(self, now: datetime) -> bool:
+        """Проверка+запись одним вызовом (для простых сценариев/тестов)."""
+        if not self.would_allow(now):
+            return False
+        self.record(now)
         return True
 
 
@@ -45,6 +59,7 @@ async def send_alert(deps, bot, chat_id: int, text: str, *,
     """Возвращает 'sent' | 'buffered'. Буферизованные приходят с утренним дайджестом
     (кнопки при буферизации теряются — сохраняется только текст)."""
     now = _now_local(deps)
+    throttle = deps.alert_throttles.setdefault(chat_id, AlertThrottle())
     if not critical:
         if is_quiet_hours(now):
             async with deps.session_factory() as session:
@@ -52,11 +67,13 @@ async def send_alert(deps, bot, chat_id: int, text: str, *,
                 await session.commit()
             log.info("alert_buffered_quiet", chat_id=chat_id)
             return "buffered"
-        if not deps.alert_throttle.allow(now):
+        if not throttle.would_allow(now):
             async with deps.session_factory() as session:
                 await push_alert(session, chat_id, text)
                 await session.commit()
             log.info("alert_buffered_throttle", chat_id=chat_id)
             return "buffered"
     await bot.send_message(chat_id, text, reply_markup=keyboard)
+    if not critical:
+        throttle.record(now)  # слот занимаем только после успешной отправки
     return "sent"

@@ -26,6 +26,8 @@ HELP_TEXT = (
     "• <code>/watch ТИКЕР</code> — следить: impact-алерты + движение ≥5%\n"
     "• <code>/thesis</code> — активные тезисы · <code>/insights</code> — уроки бота\n"
     "• <code>/history ТИКЕР</code> — прошлые разборы с исходами\n"
+    "• <code>/watch ТИКЕР</code> / <code>/unwatch</code> / <code>/watchlist</code> — "
+    "алерты по новостям и движению ≥5%\n"
     "• <code>/portfolio</code> — портфель и P&amp;L\n"
     "• <code>/digest</code> — сводка по портфелю\n"
     "• Каждое утро в 9:00 МСК дайджест приходит сам."

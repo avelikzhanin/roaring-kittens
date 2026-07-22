@@ -707,6 +707,10 @@ git commit -m "feat: per-user brokers with instance cache and TTL portfolio cach
 
 ### Task 6: alerts — троттлинг per-chat
 
+> **УЖЕ СДЕЛАНО** в hardening-батче 4a (2026-07-22, ветка reactivity-hardening):
+> per-chat `deps.alert_throttles`, слот после успешной отправки, тесты обновлены.
+> При исполнении 4b этот таск пропустить.
+
 **Files:**
 - Modify: `src/roaring_kittens/alerts.py`, `tests/test_alerts.py`
 

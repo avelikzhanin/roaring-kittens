@@ -28,7 +28,8 @@ async def test_impact_check_uses_mini():
 
 
 def test_decide_impact_action_matrix():
-    assert decide_impact_action("critical", council_recent=True) == "council_critical"
+    # дубль той же critical-истории (комитет уже был) — алерт сквозь всё, но без комитета
+    assert decide_impact_action("critical", council_recent=True) == "notify_critical"
     assert decide_impact_action("critical", council_recent=False) == "council_critical"
     assert decide_impact_action("high", council_recent=False) == "council"
     assert decide_impact_action("high", council_recent=True) == "notify"

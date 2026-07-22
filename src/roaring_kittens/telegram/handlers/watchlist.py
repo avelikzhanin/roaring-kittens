@@ -60,7 +60,10 @@ async def cmd_unwatch(message: Message, command: CommandObject, deps: Deps) -> N
     if not command.args:
         await message.answer("Формат: <code>/unwatch SBER</code>")
         return
-    ticker = command.args.split()[0].upper()
+    raw = command.args.split()[0]
+    # резолвим алиасы так же, как /watch («сбер» -> SBER); незнакомое — как ввели
+    instrument = deps.universe.resolve(raw)
+    ticker = instrument.ticker if instrument else raw.upper()
     async with deps.session_factory() as session:
         removed = await remove_from_watchlist(session, owner_id, ticker)
         await session.commit()

@@ -45,7 +45,7 @@ def _deps(now_msk):
     return SimpleNamespace(
         settings=SimpleNamespace(tz="Europe/Moscow"),
         session_factory=lambda: FakeSession(),
-        alert_throttle=AlertThrottle(max_per_hour=3),
+        alert_throttles={},
         _now=now_msk,  # для подмены времени в тесте
     )
 
@@ -74,3 +74,31 @@ async def test_send_alert_routing(monkeypatch):
     assert await send_alert(night, bot, 42, "ночной") == "buffered"
     assert await send_alert(night, bot, 42, "critical!", critical=True) == "sent"
     assert pushed == ["т4", "ночной"]
+
+
+async def test_throttle_is_per_chat(monkeypatch):
+    async def fake_push(session, chat_id, payload):
+        pass
+
+    monkeypatch.setattr(alerts_mod, "push_alert", fake_push)
+    monkeypatch.setattr(alerts_mod, "_now_local", lambda deps: deps._now)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    deps = _deps(_msk(12))
+    for _ in range(3):
+        assert await send_alert(deps, bot, 42, "x") == "sent"
+    assert await send_alert(deps, bot, 42, "x") == "buffered"   # 42 исчерпан
+    assert await send_alert(deps, bot, 777, "x") == "sent"      # у 777 свой лимит
+
+
+async def test_send_failure_does_not_consume_throttle_slot(monkeypatch):
+    monkeypatch.setattr(alerts_mod, "_now_local", lambda deps: deps._now)
+    deps = _deps(_msk(12))
+    boom = SimpleNamespace(send_message=AsyncMock(side_effect=RuntimeError("tg down")))
+    try:
+        await send_alert(deps, boom, 42, "x")
+    except RuntimeError:
+        pass
+    ok = SimpleNamespace(send_message=AsyncMock())
+    # слот НЕ сожжён: три полных отправки всё ещё доступны
+    for _ in range(3):
+        assert await send_alert(deps, ok, 42, "x") == "sent"

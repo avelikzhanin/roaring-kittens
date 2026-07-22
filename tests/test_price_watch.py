@@ -11,10 +11,14 @@ def test_significant_move_threshold():
     assert significant_move(Decimal("0"), Decimal("100")) is None       # нет базы
 
 
-def test_deduper_once_per_day():
+def test_deduper_seen_mark_and_purge():
     d = DayMoveDeduper()
     today, tomorrow = date(2026, 7, 18), date(2026, 7, 19)
-    assert d.allow("SBER", today) is True
-    assert d.allow("SBER", today) is False
-    assert d.allow("GAZP", today) is True
-    assert d.allow("SBER", tomorrow) is True  # новый день — можно снова
+    assert d.seen("SBER", today) is False   # проверка без пометки
+    assert d.seen("SBER", today) is False   # повторная проверка не пометила
+    d.mark("SBER", today)                    # пометка только после успешной отправки
+    assert d.seen("SBER", today) is True
+    assert d.seen("GAZP", today) is False
+    assert d.seen("SBER", tomorrow) is False  # новый день — можно снова
+    d.purge(tomorrow)                         # вчерашние ключи выброшены
+    assert d.seen("SBER", today) is False
