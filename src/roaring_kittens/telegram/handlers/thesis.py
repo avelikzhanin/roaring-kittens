@@ -137,7 +137,8 @@ async def cb_thesis_save(callback: CallbackQuery, deps: Deps) -> None:
                           thesis=proposal["thesis"],
                           invalidation=proposal["invalidation"], source="council",
                           confidence=proposal["confidence"], entry_price=entry,
-                          backed_by_position=meta.get("held", False))
+                          backed_by_position=meta.get("held", False),
+                          owner_id=callback.from_user.id)
         await session.commit()
     await callback.message.answer(
         f"📌 Тезис по <b>{meta['ticker']}</b> принят:\n🎯 {esc(proposal['thesis'])}\n"

@@ -105,7 +105,8 @@ async def sync_positions(deps, bot) -> None:
             rec = await save_thesis(session, ticker=pos.ticker, figi=pos.figi,
                                     thesis=draft.thesis, invalidation=draft.invalidation,
                                     source="auto", confidence=draft.confidence,
-                                    entry_price=pos.avg_price, backed_by_position=True)
+                                    entry_price=pos.avg_price, backed_by_position=True,
+                                    owner_id=owner_id)
             await session.commit()
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(

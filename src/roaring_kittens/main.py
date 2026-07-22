@@ -34,6 +34,24 @@ async def run() -> None:
             await claim_owner(session, settings.admin_telegram_id)
             await session.commit()
 
+    # Миграция 4b: владелец из bot_state -> users(admin), старые тезисы -> его owner_id.
+    # Идемпотентно; свежую инсталляцию (/start после старта) закрывает start.py.
+    from sqlalchemy import text as sa_text
+
+    from roaring_kittens.db.owner import fetch_owner_id
+    from roaring_kittens.db.users import get_user, upsert_user
+
+    owner_id = await fetch_owner_id(session_factory)
+    if owner_id is not None:
+        async with session_factory() as session:
+            if await get_user(session, owner_id) is None:
+                await upsert_user(session, owner_id, role="admin")
+                log.info("owner_migrated_to_admin", owner=owner_id)
+            await session.execute(sa_text(
+                "UPDATE theses SET owner_id = :o WHERE owner_id IS NULL"),
+                {"o": owner_id})
+            await session.commit()
+
     broker = TinkoffBroker(settings.tinkoff_token)
     universe = Universe(broker=broker)
     await universe.load()
