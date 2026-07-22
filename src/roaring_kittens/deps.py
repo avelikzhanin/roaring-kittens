@@ -22,3 +22,5 @@ class Deps:
     embedder: Embedder
     ask_limiter: DailyLimiter = field(default_factory=lambda: DailyLimiter(GUEST_ASK_DAILY_LIMIT))
     alert_throttles: dict = field(default_factory=dict)  # chat_id -> AlertThrottle
+    user_brokers: dict = field(default_factory=dict)     # user_id -> TinkoffBroker
+    portfolio_cache: dict = field(default_factory=dict)  # user_id -> (monotonic, snap)
