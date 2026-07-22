@@ -3,6 +3,7 @@ import asyncio
 import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.storage.memory import MemoryStorage
 from openai import AsyncOpenAI
 
 from roaring_kittens.ai.embeddings import Embedder
@@ -65,7 +66,7 @@ async def run() -> None:
 
     bot = Bot(token=settings.telegram_bot_token,
               default=DefaultBotProperties(parse_mode="HTML"))
-    dp = Dispatcher(deps=deps)
+    dp = Dispatcher(deps=deps, storage=MemoryStorage())
     dp.include_router(all_routers)
 
     scheduler = build_scheduler(deps, bot)
