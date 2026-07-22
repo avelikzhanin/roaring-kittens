@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS invites (
-    code        VARCHAR(16) PRIMARY KEY,
+    code        VARCHAR(24) PRIMARY KEY,  -- INV- + 16 hex (2^64: брутфорс невозможен)
     created_by  BIGINT NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at  TIMESTAMPTZ NOT NULL,
@@ -84,7 +84,7 @@ ALTER TABLE usage_log ADD COLUMN IF NOT EXISTS user_id BIGINT;
 
 - [ ] **Step 2: tables.py — колонки и таблицы**
 
-К `theses` добавить `Column("owner_id", BigInteger),` (после `close_reason`); к `usage_log` — `Column("user_id", BigInteger),`. Новые таблицы (перед bot_state):
+К `theses` добавить `Column("owner_id", BigInteger),` (ПОСЛЕДНЕЙ колонкой — ALTER TABLE добавляет в конец, порядок Table должен совпадать с БД); к `usage_log` — `Column("user_id", BigInteger),` (тоже последней). Новые таблицы (перед bot_state):
 
 ```python
 users = Table(
@@ -100,7 +100,7 @@ users = Table(
 
 invites = Table(
     "invites", metadata,
-    Column("code", String(16), primary_key=True),
+    Column("code", String(24), primary_key=True),
     Column("created_by", BigInteger, nullable=False),
     Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
     Column("expires_at", TIMESTAMP(timezone=True), nullable=False),
@@ -136,6 +136,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import text
 
 from roaring_kittens.db.tables import usage_log
 from roaring_kittens.db.users import (
@@ -175,15 +176,28 @@ async def test_invites(db_session_factory):
     async with db_session_factory() as session:
         await create_invite(session, "INV-ABC123", created_by=500, ttl_days=7)
         await create_invite(session, "INV-OLD000", created_by=500, ttl_days=7)
-        await session.execute(  # состариваем второй
+        await session.execute(text(  # состариваем второй
             "UPDATE invites SET expires_at = now() - interval '1 day' "
-            "WHERE code = 'INV-OLD000'")
+            "WHERE code = 'INV-OLD000'"))
         await session.commit()
     async with db_session_factory() as session:
         assert await redeem_invite(session, "INV-OLD000", 111) is False  # просрочен
         assert await redeem_invite(session, "INV-NOPE00", 111) is False  # нет такого
         assert await redeem_invite(session, "INV-ABC123", 111) is True
         assert await redeem_invite(session, "INV-ABC123", 222) is False  # уже погашен
+        await session.commit()
+
+
+async def test_revoked_user_reactivates_on_reupsert(db_session_factory):
+    """/admin revoke -> новый инвайт -> redeem: юзер снова active, username не затирается."""
+    async with db_session_factory() as session:
+        await upsert_user(session, 111, username="vasya")
+        await set_user_status(session, 111, "revoked")
+        await session.commit()
+    async with db_session_factory() as session:
+        u = await upsert_user(session, 111, username=None)  # redeem-путь без username
+        assert u.status == "active"            # реактивирован
+        assert u.username == "vasya"           # None не затёр сохранённое имя
         await session.commit()
 
 
@@ -205,7 +219,6 @@ async def test_month_spend_counts_current_month_for_user(db_session_factory):
         assert await month_spend(session, 999) == Decimal("0")
 ```
 
-(в conftest `from sqlalchemy import text` уже не нужен — сырой UPDATE через `session.execute(text(...))`; в тесте использовать `from sqlalchemy import text` и обернуть строку)
 
 - [ ] **Step 2: Реализовать**
 
@@ -243,9 +256,13 @@ async def upsert_user(session: AsyncSession, telegram_id: int, *,
                       username: str | None = None, role: str = "user",
                       status: str = "active") -> UserRecord:
     stmt = insert(users).values(telegram_id=telegram_id, username=username,
-                                role=role, status=status) \
-        .on_conflict_do_update(index_elements=["telegram_id"],
-                               set_={"username": username}) \
+                                role=role, status=status)
+    # Повторный upsert (redeem нового инвайта) РЕАКТИВИРУЕТ revoked-юзера;
+    # username=None не затирает сохранённое имя (coalesce с excluded).
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["telegram_id"],
+        set_={"username": func.coalesce(stmt.excluded.username, users.c.username),
+              "status": "active"}) \
         .returning(users)
     return _row((await session.execute(stmt)).first())
 
@@ -254,6 +271,11 @@ async def get_user(session: AsyncSession, telegram_id: int) -> UserRecord | None
     row = (await session.execute(
         select(users).where(users.c.telegram_id == telegram_id))).first()
     return _row(row) if row else None
+
+
+async def get_active_user(session: AsyncSession, telegram_id: int) -> UserRecord | None:
+    u = await get_user(session, telegram_id)
+    return u if u is not None and u.status == "active" else None
 
 
 async def get_user_token(session: AsyncSession, telegram_id: int) -> bytes | None:
@@ -422,7 +444,7 @@ from roaring_kittens.ai.usage_context import budget_mode, current_user_id
 ECONOM_MODEL_MAP = {"gpt-4o": "gpt-4o-mini", "gpt-4.1": "gpt-4o-mini"}
 ```
 
-В `LLM.parse` перед вызовом: `if budget_mode.get() == "econom": model = ECONOM_MODEL_MAP.get(model, model)`; в вызов `self._log_usage(...)` добавить `user_id=current_user_id.get()`.
+В `LLM.parse` перед вызовом: `if budget_mode.get() == "econom": model = ECONOM_MODEL_MAP.get(model, model)`; в вызов `self._log_usage(...)` добавить `user_id=current_user_id.get()`. Комментарий у `UsageLogger` (llm.py:12) обновить: `(operation, model, input_tokens, output_tokens, cost_usd, user_id=None)`.
 `make_db_usage_logger._log` — сигнатура `(operation, model, input_tokens, output_tokens, cost_usd, user_id=None)`, в insert добавить `user_id=user_id`.
 В `ai/embeddings.py` вызов `self._log_usage(...)` — добавить `user_id=current_user_id.get()` (и импорт). Существующие fake-логгеры в тестах (`test_llm.py`, `test_embedder.py`) — добавить `user_id=None` в сигнатуры фейков и, где проверяются кортежи, не включать его.
 
@@ -611,6 +633,18 @@ async def test_user_without_token_or_revoked_gets_none(monkeypatch):
     assert await get_user_broker(_deps(), 111) is None
 
 
+async def test_revoked_user_does_not_get_stale_cached_broker(monkeypatch):
+    """Статус проверяется ДО кэша: revoke мгновенно отрубает даже закэшированного."""
+    async def fake_get_user(session, tg_id):
+        return SimpleNamespace(role="user", status="revoked", has_token=True)
+
+    monkeypatch.setattr(us_mod, "get_user", fake_get_user)
+    deps = _deps()
+    deps.user_brokers[111] = "STALE_BROKER"   # гонка repopulation
+    assert await get_user_broker(deps, 111) is None
+    assert 111 not in deps.user_brokers        # кэш вычищен
+
+
 async def test_portfolio_cache_ttl(monkeypatch):
     calls = {"n": 0}
 
@@ -649,13 +683,18 @@ PORTFOLIO_TTL_SEC = 900  # 15 минут
 
 
 async def get_user_broker(deps, telegram_id: int):
-    """Брокер юзера: admin без токена -> системный; user -> свой (кэш); нет/revoked -> None."""
-    if telegram_id in deps.user_brokers:
-        return deps.user_brokers[telegram_id]
+    """Брокер юзера: admin без токена -> системный; user -> свой (кэш); нет/revoked -> None.
+
+    Статус проверяется ВСЕГДА (до кэша): кэш хранит только конструирование
+    TinkoffBroker, но НЕ решение об авторизации — revoked не проскочит через
+    гонку repopulation после invalidate."""
     async with deps.session_factory() as session:
         user = await get_user(session, telegram_id)
         if user is None or user.status != "active":
+            deps.user_brokers.pop(telegram_id, None)  # revoked — чистим и кэш
             return None
+        if telegram_id in deps.user_brokers:
+            return deps.user_brokers[telegram_id]
         if not user.has_token:
             return deps.broker if user.role == "admin" else None
         encrypted = await get_user_token(session, telegram_id)
@@ -688,12 +727,12 @@ async def get_cached_portfolio(deps, telegram_id: int,
     return snap
 ```
 
-`deps.py` — три поля-кэша (после alert_throttle):
+`deps.py` — ДВА новых поля-кэша после уже существующего `alert_throttles`
+(per-chat троттлы уже landed в hardening 2026-07-22; поля `alert_throttle` в Deps больше НЕТ):
 
 ```python
-    user_brokers: dict = field(default_factory=dict)
-    portfolio_cache: dict = field(default_factory=dict)
-    alert_throttles: dict = field(default_factory=dict)
+    user_brokers: dict = field(default_factory=dict)      # user_id -> TinkoffBroker
+    portfolio_cache: dict = field(default_factory=dict)   # user_id -> (monotonic, snap)
 ```
 
 - [ ] **Step 3: Commit**
@@ -707,46 +746,11 @@ git commit -m "feat: per-user brokers with instance cache and TTL portfolio cach
 
 ### Task 6: alerts — троттлинг per-chat
 
-> **УЖЕ СДЕЛАНО** в hardening-батче 4a (2026-07-22, ветка reactivity-hardening):
-> per-chat `deps.alert_throttles`, слот после успешной отправки, тесты обновлены.
-> При исполнении 4b этот таск пропустить.
-
-**Files:**
-- Modify: `src/roaring_kittens/alerts.py`, `tests/test_alerts.py`
-
-- [ ] **Step 1: Правка send_alert (deps.alert_throttle → per-chat из deps.alert_throttles)**
-
-```python
-        if not deps.alert_throttles.setdefault(chat_id, AlertThrottle()).allow(now):
-```
-
-(строку `if not deps.alert_throttle.allow(now):` заменить; поле `alert_throttle` из Deps удалить — единственный потребитель здесь; из test_alerts фикстуру `_deps` перевести на `alert_throttles={}`)
-
-- [ ] **Step 2: Обновить tests/test_alerts.py**
-
-В `_deps`: `alert_throttle=AlertThrottle(max_per_hour=3)` → `alert_throttles={}` и добавить тест изоляции:
-
-```python
-async def test_throttle_is_per_chat(monkeypatch):
-    async def fake_push(session, chat_id, payload):
-        pass
-
-    monkeypatch.setattr(alerts_mod, "push_alert", fake_push)
-    monkeypatch.setattr(alerts_mod, "_now_local", lambda deps: _msk(12))
-    bot = SimpleNamespace(send_message=AsyncMock())
-    deps = _deps(_msk(12))
-    for _ in range(3):
-        assert await send_alert(deps, bot, 42, "x") == "sent"
-    assert await send_alert(deps, bot, 42, "x") == "buffered"   # 42 исчерпан
-    assert await send_alert(deps, bot, 777, "x") == "sent"      # у 777 свой лимит
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/roaring_kittens/alerts.py src/roaring_kittens/deps.py tests/test_alerts.py
-git commit -m "feat: per-chat alert throttling"
-```
+> **✅ УЖЕ СДЕЛАНО** в hardening-батче 4a (2026-07-22, коммит 4623e72 в master):
+> per-chat `deps.alert_throttles` с would_allow/record-сплитом (слот занимается ПОСЛЕ
+> успешной отправки), тесты обновлены. При исполнении 4b этот таск ПРОПУСТИТЬ ЦЕЛИКОМ —
+> никаких шагов не выполнять (ревью: прежний снипет с `.allow()` регрессировал бы
+> send-failure-гарантию).
 
 ---
 
@@ -758,9 +762,10 @@ git commit -m "feat: per-chat alert throttling"
 - [ ] **Step 1: theses.py — скоупинг**
 
 - `ThesisRecord` + поле `owner_id: int | None = None` (последним, default); `_row` добавляет `owner_id=r.owner_id`.
-- `save_thesis(..., owner_id: int)` — обязательный kwarg; supersede-UPDATE получает условие `theses.c.owner_id == owner_id`; insert values + owner_id.
-- `get_active_thesis(session, ticker, owner_id)`, `get_active_theses(session, owner_id=None)` (None — все, для валидатора), `get_recently_closed(session, days, owner_id, ...)`, `get_recently_deleted_tickers(session, owner_id, days=30)` — фильтр `owner_id` где передан.
-- Все вызовы по кодовой базе обновить (positions_sync, scheduler.validate_theses — там `get_active_theses(session)` остаётся все-пользовательским, price_watch — все, reflection — owner admin'а, handlers/thesis.py — свои).
+- `save_thesis(..., owner_id: int)` — ЕДИНСТВЕННЫЙ обязательный kwarg; supersede-UPDATE получает условие `theses.c.owner_id == owner_id`; insert values + owner_id.
+- Все read-side функции получают `owner_id: int | None = None` **keyword-only, ПОСЛЕДНИМ параметром после существующих** (фильтр применяется только когда не None) — существующие вызовы и тесты НЕ ломаются: `get_active_thesis(session, ticker, *, owner_id=None)`, `get_active_theses(session, *, owner_id=None)` (None — все, для валидатора), `get_recently_closed(session, days, ..., *, owner_id=None)`, `get_recently_deleted_tickers(session, days=30, *, owner_id=None)`.
+- `close_thesis(..., *, owner_id: int | None = None)` — при не-None добавляет условие `theses.c.owner_id == owner_id` (нужно для ре-гейта cb_thesis_del в Task 10).
+- Вызовы обновляются ТОЛЬКО там, где нужна изоляция (handlers/thesis.py — свои; positions_sync/reflection — в Task 12); валидатор и price_watch остаются все-пользовательскими без правок в этом таске.
 
 - [ ] **Step 2: main.py — миграция (после claim_owner-блока)**
 
@@ -828,10 +833,12 @@ from roaring_kittens.telegram.handlers.onboarding import (
 
 def test_invite_code_format_roundtrip():
     code = generate_invite_code()
+    assert len(code) == 20                            # INV- + 16 hex (2^64)
     assert looks_like_invite(code) is True
-    assert looks_like_invite("inv-abc123") is True   # регистр не важен
+    assert looks_like_invite(code.lower()) is True    # регистр не важен
+    assert looks_like_invite("INV-ABC123") is False   # старый короткий формат — нет
     assert looks_like_invite("HELLO") is False
-    assert looks_like_invite("INV-TOOLONG123") is False
+    assert looks_like_invite("INV-" + "Z" * 16) is False  # не hex
 
 
 def test_token_shape():
@@ -844,26 +851,35 @@ def test_token_shape():
 
 ```python
 # src/roaring_kittens/telegram/handlers/onboarding.py
-"""Онбординг друга: инвайт-код -> инструкция -> приём токена (сообщение удаляется)."""
+"""Онбординг друга: инвайт-код -> инструкция -> приём токена (сообщение удаляется).
+
+Всё ТОЛЬКО в личке (F.chat.type == "private") — токен в группе недопустим."""
 import re
 import secrets
 
 import structlog
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 
-from roaring_kittens.db.users import redeem_invite, set_user_token, upsert_user
+from roaring_kittens.db.users import (
+    get_active_user, redeem_invite, set_user_token, upsert_user,
+)
 from roaring_kittens.deps import Deps
 from roaring_kittens.security.crypto import encrypt_secret
 from roaring_kittens.users_service import get_user_broker, invalidate_user_broker
+from roaring_kittens.utils.ratelimit import DailyLimiter
 
 log = structlog.get_logger()
 router = Router()
 
-INVITE_RE = re.compile(r"^INV-[A-F0-9]{6}$", re.IGNORECASE)
+INVITE_RE = re.compile(r"^INV-[A-F0-9]{16}$", re.IGNORECASE)
 TOKEN_RE = re.compile(r"^t\.[A-Za-z0-9_\-]{16,}$")
+
+# Подбор кодов: формат-валидных попыток мало у честного юзера, много у брутфорса
+_redeem_limiter = DailyLimiter(10)
 
 
 class Onboarding(StatesGroup):
@@ -871,7 +887,7 @@ class Onboarding(StatesGroup):
 
 
 def generate_invite_code() -> str:
-    return "INV-" + secrets.token_hex(3).upper()
+    return "INV-" + secrets.token_hex(8).upper()   # 16 hex = 2^64
 
 
 def looks_like_invite(text: str) -> bool:
@@ -891,12 +907,15 @@ TOKEN_INSTRUCTIONS = (
 )
 
 
-@router.message(F.text.regexp(r"(?i)^INV-[A-F0-9]{6}$"))
+@router.message(F.chat.type == "private", F.text.regexp(r"(?i)^INV-[A-F0-9]{16}$"))
 async def handle_invite_code(message: Message, deps: Deps, state: FSMContext) -> None:
+    if not _redeem_limiter.allow(message.from_user.id):
+        await message.answer("⏳ Слишком много попыток — попробуй завтра.")
+        return
     code = message.text.strip().upper()
     async with deps.session_factory() as session:
         ok = await redeem_invite(session, code, message.from_user.id)
-        if ok:
+        if ok:  # upsert реактивирует revoked (status='active' в set_)
             await upsert_user(session, message.from_user.id,
                               username=message.from_user.username)
         await session.commit()
@@ -907,16 +926,36 @@ async def handle_invite_code(message: Message, deps: Deps, state: FSMContext) ->
     await message.answer(TOKEN_INSTRUCTIONS)
 
 
-@router.message(Onboarding.waiting_token, F.text == "/cancel")
+@router.message(Onboarding.waiting_token, Command("cancel"))
 async def cancel_onboarding(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Ок, отменил. Аккаунт создан без портфеля — /ask доступен. "
-                         "Токен можно прислать позже, начав с инвайт-кода заново.")
+                         "Захочешь подключить счёт — просто пришли /token.")
+
+
+@router.message(Command("token"))
+async def cmd_token(message: Message, deps: Deps, state: FSMContext) -> None:
+    """Повторный вход в приём токена: после /cancel или для ротации. Инвайт гейтит
+    только ПЕРВУЮ регистрацию — существующему active-юзеру код заново не нужен."""
+    if message.chat.type != "private":
+        return
+    async with deps.session_factory() as session:
+        user = await get_active_user(session, message.from_user.id)
+    if user is None:
+        await message.answer("Сначала нужен инвайт-код от владельца (формат INV-…).")
+        return
+    await state.set_state(Onboarding.waiting_token)
+    await message.answer(TOKEN_INSTRUCTIONS)
 
 
 @router.message(Onboarding.waiting_token)
 async def handle_token(message: Message, deps: Deps, state: FSMContext) -> None:
     text = (message.text or "").strip()
+    if text.startswith("/"):
+        # команды не глотаем молча: FSM-state перехватывает всё — подскажем выход
+        await message.answer("Сейчас жду токен. Пришли его или /cancel — "
+                             "потом команды снова заработают.")
+        return
     if not looks_like_tinkoff_token(text):
         await message.answer("Не похоже на токен (ожидаю <code>t.XXXX…</code>). "
                              "Попробуй ещё раз или /cancel.")
@@ -924,7 +963,12 @@ async def handle_token(message: Message, deps: Deps, state: FSMContext) -> None:
     try:
         await message.delete()  # токен не должен остаться в чате
     except Exception as exc:
-        log.warning("token_message_delete_failed", error=str(exc))
+        # Не смогли удалить — токен НЕ сохраняем: он остался в переписке
+        log.error("token_message_delete_failed", error=str(exc))
+        await message.answer("⚠️ Не смог удалить сообщение с токеном — он остался в чате. "
+                             "Этот токен НЕ сохранён: отзови его в настройках Tinkoff, "
+                             "выпусти новый и пришли ещё раз.")
+        return
     encrypted = encrypt_secret(text, deps.settings.fernet_key)
     async with deps.session_factory() as session:
         await set_user_token(session, message.from_user.id, encrypted)
@@ -949,10 +993,28 @@ async def handle_token(message: Message, deps: Deps, state: FSMContext) -> None:
         f"Тебе доступно: /portfolio /digest /ask /thesis /watch /budget.\n"
         f"Утренний дайджест — сам в 9:00 МСК. Тезисы для позиций ≥5% появятся "
         f"после ближайшей утренней сверки.")
+
+
+@router.message(F.chat.type == "private", F.text.regexp(r"^t\.[A-Za-z0-9_\-]{16,}$"))
+async def stray_token(message: Message, deps: Deps, state: FSMContext) -> None:
+    """Токен вне FSM (MemoryStorage сбросился на редеплое / юзер прислал без /token).
+    Сообщение удаляем ВСЕГДА; известному active-юзеру — обрабатываем как submission."""
+    async with deps.session_factory() as session:
+        user = await get_active_user(session, message.from_user.id)
+    if user is None:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.answer("Похоже на токен! Но сначала нужен инвайт-код (INV-…). "
+                             "Токен на всякий случай удалил — после кода пришлёшь новый.")
+        return
+    await state.set_state(Onboarding.waiting_token)
+    await handle_token(message, deps, state)
 ```
 
 `main.py`: `from aiogram.fsm.storage.memory import MemoryStorage` и `dp = Dispatcher(deps=deps, storage=MemoryStorage())`.
-`handlers/__init__.py`: подключить `onboarding.router` ПЕРВЫМ (state-фильтры должны видеть сообщения раньше catch-all-хендлеров).
+`handlers/__init__.py`: подключить `onboarding.router` ПЕРВЫМ (state-фильтры должны видеть сообщения раньше catch-all-хендлеров). Глотание команд в waiting_token решено passthrough-веткой в handle_token; `stray_token` регистрируется ПОСЛЕ handle_token в том же роутере (при активном state побеждает handle_token).
 
 - [ ] **Step 3: Push → CI, Commit**
 
@@ -1014,7 +1076,7 @@ from aiogram.types import Message
 
 from roaring_kittens.db.users import (
     UserRecord, create_invite, get_user, list_active_users, month_spend,
-    set_user_budget, set_user_status,
+    set_user_budget, set_user_status, set_user_token,
 )
 from roaring_kittens.deps import Deps
 from roaring_kittens.telegram.handlers.onboarding import generate_invite_code
@@ -1041,7 +1103,7 @@ def format_users(users: list[UserRecord], spend: dict[int, Decimal]) -> str:
 async def _require_admin(message: Message, deps: Deps) -> bool:
     async with deps.session_factory() as session:
         user = await get_user(session, message.from_user.id)
-    if user is None or user.role != "admin":
+    if user is None or user.role != "admin" or user.status != "active":
         await message.answer("🔒 Только для admin.")
         return False
     return True
@@ -1061,18 +1123,24 @@ async def cmd_admin(message: Message, command: CommandObject, deps: Deps) -> Non
             code = generate_invite_code()
             await create_invite(session, code, created_by=message.from_user.id)
             await session.commit()
-            await message.answer(f"🎟 Код (7 дней): <code>{code}</code>\n"
-                                 f"Друг просто отправляет его боту.")
+            me = await message.bot.get_me()
+            await message.answer(
+                f"🎟 Код (7 дней): <code>{code}</code>\n"
+                f"Друг просто отправляет его боту, или по ссылке:\n"
+                f"https://t.me/{me.username}?start={code}")
         elif sub == "users" or sub == "stats":
             users = await list_active_users(session)
             spend = {u.telegram_id: await month_spend(session, u.telegram_id)
                      for u in users}
             await message.answer(format_users(users, spend))
         elif sub == "revoke" and len(args) > 1 and args[1].isdigit():
-            await set_user_status(session, int(args[1]), "revoked")
+            uid = int(args[1])
+            await set_user_status(session, uid, "revoked")
+            await set_user_token(session, uid, None)  # шифро-токен в БД не держим
             await session.commit()
-            invalidate_user_broker(deps, int(args[1]))
-            await message.answer(f"⛔️ {args[1]} отключён.")
+            invalidate_user_broker(deps, uid)
+            await message.answer(f"⛔️ {uid} отключён, его токен стёрт из БД.\n"
+                                 f"Посоветуй ему также отозвать токен в Tinkoff.")
         elif sub == "set_budget" and len(args) > 2 and args[1].isdigit():
             await set_user_budget(session, int(args[1]), Decimal(args[2]))
             await session.commit()
@@ -1090,6 +1158,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from roaring_kittens.budget import budget_state
+from roaring_kittens.db.users import get_user
 from roaring_kittens.deps import Deps
 
 router = Router()
@@ -1107,6 +1176,12 @@ def format_budget(state: str, spent: Decimal, limit: Decimal) -> str:
 
 @router.message(Command("budget"))
 async def cmd_budget(message: Message, deps: Deps) -> None:
+    async with deps.session_factory() as session:
+        user = await get_user(session, message.from_user.id)
+    if user is None:  # гость: не пугаем «🔴 $0/$0»
+        await message.answer("Бюджет считается после подключения по инвайт-коду. "
+                             "Гостевой /ask — 10 запросов в день.")
+        return
     state, spent, limit = await budget_state(deps, message.from_user.id)
     await message.answer(format_budget(state, spent, limit))
 ```
@@ -1127,13 +1202,7 @@ git commit -m "feat: /admin suite and /budget command"
 **Files:**
 - Modify: `telegram/handlers/{portfolio,digest,ask,council,thesis,seed,watchlist,track,start}.py`
 
-- [ ] **Step 1: Общий помощник (в `db/users.py` дописать)**
-
-```python
-async def get_active_user(session: AsyncSession, telegram_id: int) -> UserRecord | None:
-    u = await get_user(session, telegram_id)
-    return u if u is not None and u.status == "active" else None
-```
+- [ ] **Step 1: Общий помощник `get_active_user` — уже добавлен в Task 2 (нужен онбордингу)**
 
 - [ ] **Step 2: Пер-хендлерные правки (паттерн один — привожу целиком для portfolio, остальные аналогично)**
 
@@ -1155,15 +1224,35 @@ async def cmd_portfolio(message: Message, deps: Deps) -> None:
 ```
 
 Аналогично:
-- `digest.py`: `broker = await get_user_broker(...)`; `run_morning_digest(deps, bot, chat_id, broker)` (см. Task 11).
-- `ask.py`: `build_position_note` → принимает broker юзера (`get_user_broker`; None → note=None); гостевой лимитер остаётся для НЕзарегистрированных (`get_active_user is None`); зарегистрированный оборачивает вызов в `use_user(id)` + `use_budget_mode(state if econom)`.
-- `council.py`: гейт = активный юзер с брокером; перед запуском `state,_,_ = await budget_state(deps, uid)`; `blocked` → `HEAVY_BLOCKED_MSG`; запуск в `with use_user(uid), use_budget_mode("econom" if state=="econom" else "ok"):`; `run_council_flow(..., broker=broker)` — контекст позиции от СВОЕГО брокера (см. Task 11); кнопки как раньше.
+- `digest.py`: `broker = await get_user_broker(...)`; None → отказ с подсказкой про инвайт; `run_morning_digest(deps, bot, chat_id, broker=broker)` (сигнатура с default — Task 11).
+- `ask.py`: `build_position_note(broker, ticker)` — broker юзера (`get_user_broker`; None → note=None); гостевой лимитер остаётся для НЕзарегистрированных (`get_active_user is None`); зарегистрированный оборачивает `_analyze_and_edit` в `use_user(id)` + `use_budget_mode("econom" if state in ("econom", "blocked") else "ok")` — **blocked деградирует /ask до mini** (решение 7: «/ask-mini остаются»), НЕ оставляет полный gpt-4o.
+- `council.py`: гейт = активный юзер с брокером; перед запуском `state, _, _ = await budget_state(deps, uid)`; `blocked` → `HEAVY_BLOCKED_MSG`; запуск в `with use_user(uid), use_budget_mode("econom" if state == "econom" else "ok"):`; `run_council_flow(..., broker=broker)` — контекст позиции от СВОЕГО брокера (см. Task 11); кнопки как раньше.
 - `thesis.py`: все выборки/сохранения с `owner_id=message.from_user.id`; гейт — активный юзер; `/insights` — role=='admin'.
 - `seed.py`: гейт активный юзер с брокером; blocked-бюджет → отказ; `use_user`; позиции — свой брокер; save_call.asked_by уже его.
 - `watchlist.py`: `_owner_or_none` → `_active_user_or_none` (без требования токена — watch можно и без портфеля).
-- `track.py`: без изменений (общий).
+- `track.py`: без изменений (общий; get_scored_calls не выбирает summary — позиции не палятся).
 - `/history` в `thesis.py`: фильтр `asked_by`: добавить в `get_ticker_history(session, ticker, limit, asked_by=None)` необязательный фильтр; хендлер передаёт свой id (admin — None).
-- `start.py`: приветствие: если юзер в users — статус/подсказки; иначе прежний owner-claim + строка «Есть инвайт-код? Просто пришли его сюда (формат INV-XXXXXX)».
+- `start.py`: **(а)** при `just_claimed` (и при owner_id == from_user.id без строки в users) — СРАЗУ `await upsert_user(session, message.from_user.id, username=..., role="admin")` в той же транзакции, что claim_owner: свежая инсталляция, где /start пришёл ПОСЛЕ старта процесса, не должна ждать рестарта для миграции. **(б)** deep-link: `async def cmd_start(message, command: CommandObject, deps, state)` с `CommandStart(deep_link=True)` дополнительным хендлером — если `command.args` матчит INVITE_RE, роутить в тот же redeem-флоу, что handle_invite_code (вынести общее тело в функцию). **(в)** приветствие: если юзер в users — статус/подсказки; иначе прежний owner-claim + строка «Есть инвайт-код? Просто пришли его сюда (или открой ссылку-приглашение)».
+
+- [ ] **Step 2b: Ре-гейт КОЛБЭКОВ per-user (блокер из ревью — иначе кросс-tenant runs)**
+
+`db/council.py` — новый аксессор (get_council_transcript оставить для совместимости):
+
+```python
+async def get_council_run(session: AsyncSession,
+                          run_id: UUIDType | None) -> tuple[dict, int] | None:
+    """(transcript, asked_by) — колбэкам нужен владелец прогона для гейта."""
+    if run_id is None:
+        return None
+    row = (await session.execute(
+        select(council_runs.c.transcript, council_runs.c.asked_by)
+        .where(council_runs.c.id == run_id))).first()
+    return (row[0], row[1]) if row else None
+```
+
+- `council.py::cb_protocol`: вместо owner-гейта — `get_council_run`; допуск: `callback.from_user.id == asked_by` ИЛИ юзер admin (транскрипт содержит позицию инициатора — чужим нельзя).
+- `thesis.py::cb_thesis_save`: тот же гейт по `asked_by`; `get_active_thesis(session, ticker, owner_id=callback.from_user.id)`; `save_thesis(..., owner_id=callback.from_user.id)` — тезис сохраняется ВЛАДЕЛЬЦУ КНОПКИ, не глобально.
+- `thesis.py::cb_thesis_del`: `close_thesis(session, thesis_id, ..., owner_id=callback.from_user.id)` (условие в WHERE — чужой thesis_id не закроется; admin тоже закрывает только свои).
 
 - [ ] **Step 3: Push → CI, Commit**
 
@@ -1181,13 +1270,23 @@ git commit -m "feat: user-based gates with budget enforcement across commands"
 
 - [ ] **Step 1: Сигнатуры**
 
-- `run_morning_digest(deps, bot, chat_id, broker)` — все `deps.broker.get_portfolio()` → `broker.get_portfolio()`; `build_spotlight(deps, position, asked_by)` не меняется (свечи — системные `deps.broker`).
+- `run_morning_digest(deps, bot, chat_id, broker=None)` — **default None означает `deps.broker`** (`broker = broker or deps.broker` первой строкой): существующие 3-арг вызовы (scheduler.py:274, digest-хендлер) НЕ ломаются между коммитами Task 10/11/12; все `deps.broker.get_portfolio()` внутри → `broker.get_portfolio()`; `build_spotlight(deps, position, asked_by)` не меняется (свечи — системные `deps.broker`).
 - `build_council_context(deps, instrument, asked_by, today, include_memory=True, broker=None)`: блок позиции — `broker` (если None → позиции нет); **market data (свечи/дивиденды) остаются на `deps.broker`**.
 - `run_council_flow(deps, instrument, asked_by, ctx=None, on_stage=None, broker=None)` — прокидывает broker в build_council_context.
 - `positions_sync.sync_positions(deps, bot)` → цикл по юзерам (Task 12), внутренняя `_sync_user(deps, bot, user_id, broker)` использует user-broker для snap, `deps.broker` для свечей realized return; `save_thesis(..., owner_id=user_id)`; suppressed/active — по owner_id.
 - `ask.py` `build_position_note(deps, ticker)` → `build_position_note(broker, ticker)` (fetch snap с переданного брокера).
 
-- [ ] **Step 2: Обновить существующие тесты сигнатур** (`test_council_context.py` — параметр broker=None по умолчанию не ломает; digest-тесты builder-функций не трогаются).
+- [ ] **Step 1b: Память комитета — скоупинг по юзеру (ревью: утечка позиционного rationale)**
+
+`calls.summary` у council-вызовов = `proposal.rationale`, который ВИДЕЛ позицию инициатора
+(«у тебя 20% портфеля в SBER…») — через `find_similar_calls` он утекал бы в промпты
+ДРУГИХ юзеров, и LLM может его процитировать.
+
+- `find_similar_calls(session, embedding, k=3, *, asked_by: int | None = None)` — при не-None фильтр `calls.c.asked_by == asked_by` (память = твой собственный опыт).
+- `build_memory_note(deps, ticker, situation_text, asked_by)` — прокидывает в find_similar_calls; вызов в `committee/context.py` передаёт `asked_by` прогона.
+- insights (`top_insights_by_similarity`) не трогаем: уроки рефлексии admin-scoped по решению 3 и формулируются обобщённо.
+
+- [ ] **Step 2: Обновить существующие тесты сигнатур** (`test_council_context.py` — параметр broker=None по умолчанию не ломает; digest-тесты builder-функций не трогаются; test_memory — добавить asked_by).
 
 - [ ] **Step 3: Push → CI, Commit**
 
@@ -1205,10 +1304,39 @@ git commit -m "refactor: broker parameterization for per-user portfolio context"
 
 - [ ] **Step 1: scheduler.py**
 
-- `morning_digest_job`: цикл `for u in await list_active_users(session)` → `broker = await get_user_broker(deps, u.telegram_id)`; если broker None — только дренаж буфера юзера (если есть); иначе дренаж + `with use_user(u.telegram_id): await run_morning_digest(deps, bot, u.telegram_id, broker)`; ошибки одного юзера не роняют остальных (try/except вокруг тела цикла).
-- `validate_theses`: тезисы уже всех юзеров (`get_active_theses(session)`); адресат — `thesis.owner_id` (fallback на admin, если None); авто-комитет: `state,_,_ = budget_state(deps, owner)` → blocked ⇒ только notify (critical), не council; запуск `with use_user(owner), use_budget_mode(...)`; `run_council_flow(..., broker=await get_user_broker(deps, owner))`.
-- `impact_scan`: цикл по активным юзерам с брокером: interest = `get_cached_portfolio` ∪ их watchlist − их thesis-тикеры; **классификация новостей по тикеру кэшируется в рамках прогона** (`checked: dict[str, ImpactCheck]`), уведомления — каждому заинтересованному юзеру; council-ветка — от имени юзера с его budget-гейтом (blocked ⇒ notify-only).
-- `weekly_reflection_job`: без изменений по сути, но явное `admin`-скоупирование: `closed = get_recently_closed(session, days=7, owner_id=admin_id)`; отправка админу.
+- Хелпер бюджета на джобу: `state, _, _ = await budget_state(deps, uid)` считается РАЗ на юзера на цикл; `mode = "econom" if state in ("econom", "blocked") else "ok"` — весь per-user блок джобы оборачивается `with use_user(uid), use_budget_mode(mode):`. При `blocked` дополнительно скипаются ТЯЖЁЛЫЕ пути (council, spotlight, авто-тезисы), но дайджест-текст и алерты живут (на mini).
+- **80%-переход — одно уведомление:** module-level `_budget_notified: set[tuple[int, str]]` (user_id, 'YYYY-MM'); когда вычисленный state впервые за месяц не 'ok' — `send_alert(deps, bot, uid, "🟡 80% AI-бюджета — до 1-го числа перехожу на эконом-модели. /budget")` (для blocked — 🔴-вариант) и добавить в set. In-memory: после рестарта уведомит повторно максимум раз — приемлемо.
+- `morning_digest_job`: цикл `for u in await list_active_users(session)`; на каждого — `try/except` (ошибки одного не роняют остальных); дренаж буфера юзера (`_flush_buffer`) ВСЕГДА; `broker = await get_user_broker(deps, u.telegram_id)`; если broker есть — budget-обёртка (см. выше) + `await run_morning_digest(deps, bot, u.telegram_id, broker)`; при blocked дайджест идёт в econom-режиме, но `build_spotlight` внутри скипается (передать флаг или проверить budget_mode.get() в morning.py).
+- `validate_theses`: тезисы всех юзеров (`get_active_theses(session)`); **NULL owner_id ⇒ `log.error("thesis_without_owner", thesis_id=...)` и skip** (не роутить чужой контент админу; после миграции таких нет); адресат всех алертов — `thesis.owner_id`; авто-комитет: budget-обёртка по owner; blocked ⇒ только notify (critical) с припиской «(бюджет исчерпан — комитет не собирал, /budget)», не council; `run_council_flow(..., broker=await get_user_broker(deps, owner))`.
+- `impact_scan` — двухпроходный скелет (классификация БЕЗ юзер-контекста — системный кост, user_id=NULL, одна LLM-классификация на тикер на прогон):
+
+```python
+async def impact_scan(deps, bot, fresh_items, skip_tickers_by_user):
+    by_ticker = _group_fresh(fresh_items)               # как сейчас, с GENERIC-капом
+    if not by_ticker:
+        return
+    # интересы каждого active-юзера: кэш-портфель ∪ его watchlist − его thesis-тикеры
+    interests: dict[int, set[str]] = await _collect_interests(deps)
+    union = set().union(*interests.values()) if interests else set()
+    checked: dict[str, ImpactCheck] = {}
+    for ticker in sorted(set(by_ticker) & union):       # ПРОХОД 1: система платит
+        try:
+            checked[ticker] = await run_impact_check(deps.llm, ticker, by_ticker[ticker])
+        except Exception as exc:
+            log.error("impact_check_failed", ticker=ticker, error=str(exc))
+    for uid, tickers in interests.items():              # ПРОХОД 2: per-user реакция
+        state, _, _ = await budget_state(deps, uid)
+        mode = "econom" if state in ("econom", "blocked") else "ok"
+        for ticker in sorted(tickers & set(checked)):
+            with use_user(uid), use_budget_mode(mode):
+                await _react_for_user(deps, bot, uid, ticker, checked[ticker],
+                                      by_ticker[ticker], heavy_ok=state != "blocked")
+```
+
+  `_react_for_user` — прежнее тело реакции: notify/critical этому uid; council-ветка только при `heavy_ok`, `broker=await get_user_broker(deps, uid)`, **вердикт и кнопки (proto:/thesis_save) — ТОЛЬКО этому uid** (run.asked_by=uid — колбэки согласованы с ре-гейтом Task 10); при blocked вместо комитета — приписка «(бюджет исчерпан — комитет не собирал, /budget)». `council_ran_recently` остаётся глобальным по тикеру (дёшево, cost-guard); когда guard срезал комитет — в notify добавить «комитет по этой новости уже собирался — /council TICKER для своего разбора».
+- `drain_pending_job`: вместо owner-only — `SELECT DISTINCT chat_id FROM alerts_buffer` (новая `list_buffered_chats(session)` в db/alerts_buffer.py) и `_flush_buffer` каждому, per-chat try/except: покрывает и друзей, и stranded-строки только что revoked-юзеров.
+- `weekly_reflection_job`: явное `admin`-скоупирование: `closed = get_recently_closed(session, days=7, owner_id=admin_id)` + `with use_user(admin_id):`; отправка админу.
+- `poll_news`: `validate_theses` возвращает handled-set как есть (тикеры уже per-owner внутри); `impact_scan(deps, bot, fresh_items, skip_tickers_by_user=handled_by_user)` — валидатор возвращает `dict[int, set[str]]` (owner → его handled-тикеры), interest-вычитание в `_collect_interests` per-user (у одного тезис — другому HIGH-алерт по той же бумаге всё ещё нужен).
 
 - [ ] **Step 2: positions_sync.py — обёртка**
 
@@ -1227,11 +1355,13 @@ async def sync_positions(deps, bot) -> None:
             log.error("sync_user_failed", user=u.telegram_id, error=str(exc))
 ```
 
-`_sync_user` — прежнее тело `sync_positions` c заменами: `owner_id=user_id`, `snap = await broker.get_portfolio()`, theses/suppressed/save — c owner_id, уведомления на `user_id`.
+`_sync_user` — прежнее тело `sync_positions` c заменами: `owner_id=user_id`, `snap = await get_cached_portfolio(deps, user_id, broker)` (кэш 8:50 переиспользуется дайджестом в 9:00 — один Tinkoff-запрос вместо двух), theses/suppressed/save — c owner_id, уведомления на `user_id`; budget-гейт: при blocked авто-тезисы (thesis_gen LLM) скипаются, при econom — идут на mini через use_budget_mode.
+
+**Латентность (принято):** дайджест и sync — последовательные циклы по юзерам с LLM-вызовами; для N≤10 f&f это минуты — ок. Логировать per-user duration (`log.info("digest_user_done", user=..., sec=...)`), чтобы рост был виден до того, как заболит.
 
 - [ ] **Step 3: price_watch.py — интересы всех юзеров**
 
-`figi_by_ticker` собирать per-user (`interests: dict[user_id, dict[ticker, figi]]`), last_prices — одним батчем по объединению figi (системный брокер), алерты — каждому юзеру по его интересам, дедуп-ключ `(date, user_id, ticker)` (расширить `DayMoveDeduper.allow(user_id, ticker, today)` и тест).
+`figi_by_ticker` собирать per-user (`interests: dict[user_id, dict[ticker, figi]]`), last_prices — одним батчем по объединению figi (системный брокер), алерты — каждому юзеру по его интересам. Дедуп: **СОХРАНИТЬ split-API `seen`/`mark`** (mark ПОСЛЕ успешной отправки — hardening-инвариант, метод `allow` НЕ вводить), только расширить ключ: `seen(user_id, ticker, today)` / `mark(user_id, ticker, today)`, `_seen: set[tuple[date, int, str]]`; purge без изменений (фильтр по k[0]); существующий тест — обновить вызовы на 3-арг.
 
 - [ ] **Step 4: Push → CI, Commit**
 
@@ -1286,3 +1416,17 @@ git tag phase-4b && git push origin phase-4b
 - **Placeholder scan:** в T10/T12 модификации описаны паттерном с полным кодом ключевых мест — исполняющий агент (я, с полным контекстом кода) закрывает механику; новые модули — код целиком ✅
 - **Приватность:** токены только шифрованными, сообщение удаляется, decrypt только в get_user_broker; календарь угроз: revoked → invalidate кэша ✅
 - **Cost:** portfolio TTL-кэш 15м для 5-мин impact_scan; классификация новости 1 раз на тикер за прогон; budget-гейт на всех тяжёлых путях ✅
+
+---
+
+## Адверсарное ревью (2026-07-22, воркфлоу 3 ревьюера: codebase-api / security-isolation / jobs-cost-ux)
+
+33 находки → верифицированы вручную по коду → **24 уникальных подтверждено и внесено в план** (правки выше). Ключевые:
+
+**Блокер:** колбэки `proto:`/`thesis_save:`/`thesis_del:` были owner-гейтнутыми — при мультитенантности друг не смог бы открыть протокол СВОЕГО комитета, а наивный «any active user» дал бы кросс-tenant доступ к чужим прогонам (транскрипт содержит позицию). → Task 10 Step 2b: `get_council_run` возвращает asked_by, гейт по инициатору/admin, thesis_save/del с owner_id.
+
+**Major:** upsert_user не реактивировал revoked и затирал username (T2); свежий владелец через /start после старта процесса не получал users-строку до рестарта (T10 start.py); DayMoveDeduper.allow() не существует — сохранён seen/mark сплит с расширенным ключом (T12); get_user_broker отдавал кэш ДО проверки статуса (T5); blocked-юзер сохранял неметеренный полный /ask — деградация до mini (T10); токен-FSM не был ограничен личкой + недоудалённое сообщение с токеном теперь абортит сохранение (T8); impact_scan: классификация — системный кост одним проходом, вердикт и кнопки комитета — только инициатору (T12); позиционный rationale комитета утекал через общую pgvector-память в чужие промпты — find_similar_calls скоупится по asked_by (T11); инвайт-коды 6 hex без лимитера — 16 hex + DailyLimiter (T8); /cancel был тупиком со сгоревшим инвайтом — /token для повторного входа (T8); drain_pending_job дренирует все чаты из буфера, не только владельца (T12); бюджет-гейт довязан до дайджеста/spotlight/sync (T12).
+
+**Minor:** text() в тесте, deps-дельта без дублей, run_morning_digest broker=None default, _require_admin проверяет status, revoke стирает токен, NULL-owner тезис — skip+log, глобальный council-guard с подсказкой «/council TICKER для своего», 80%-уведомление разово, /budget для гостей без «$0/$0», deep-link t.me/?start=INV-…, MemoryStorage-фолбэк для stray-токена, латентность циклов задокументирована.
+
+**Отклонено после проверки кода:** «/track worst-misses палят позиции» — `get_scored_calls` не выбирает summary (только тикер/stance/цифры), /track остаётся общим по решению 1; «Task 6 надо исполнять» — уже в master (4623e72).
