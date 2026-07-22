@@ -2,22 +2,23 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from roaring_kittens.db.owner import fetch_owner_id
 from roaring_kittens.deps import Deps
 from roaring_kittens.telegram.formatting import format_portfolio
+from roaring_kittens.users_service import get_user_broker
 
 router = Router()
 
-NOT_OWNER = ("🔒 Портфель привязан к счёту владельца бота и виден только ему.\n"
+NO_BROKER = ("🔒 Портфель доступен после подключения своего Tinkoff-токена "
+             "(нужен инвайт-код от владельца).\n"
              "Тебе доступен /ask — разбор любой бумаги Мосбиржи.")
 
 
 @router.message(Command("portfolio"))
 @router.message(F.text == "📊 Портфель")
 async def cmd_portfolio(message: Message, deps: Deps) -> None:
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if owner_id is None or message.from_user.id != owner_id:
-        await message.answer(NOT_OWNER)
+    broker = await get_user_broker(deps, message.from_user.id)
+    if broker is None:
+        await message.answer(NO_BROKER)
         return
-    snap = await deps.broker.get_portfolio()
+    snap = await broker.get_portfolio()
     await message.answer(format_portfolio(snap))

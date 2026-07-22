@@ -22,3 +22,14 @@ async def get_council_transcript(session: AsyncSession,
     row = (await session.execute(
         select(council_runs.c.transcript).where(council_runs.c.id == run_id))).first()
     return row[0] if row else None
+
+
+async def get_council_run(session: AsyncSession,
+                          run_id: UUIDType | None) -> tuple[dict, int] | None:
+    """(transcript, asked_by) — колбэкам нужен владелец прогона для гейта."""
+    if run_id is None:
+        return None
+    row = (await session.execute(
+        select(council_runs.c.transcript, council_runs.c.asked_by)
+        .where(council_runs.c.id == run_id))).first()
+    return (row[0], row[1]) if row else None

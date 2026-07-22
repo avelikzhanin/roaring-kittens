@@ -11,11 +11,13 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from roaring_kittens.ai.analyst import run_analyst
+from roaring_kittens.ai.usage_context import use_user
 from roaring_kittens.broker.tech import compute_tech_summary
+from roaring_kittens.budget import HEAVY_BLOCKED_MSG, budget_state
 from roaring_kittens.db.calls import get_retro_seeded_keys, save_call
-from roaring_kittens.db.owner import fetch_owner_id
 from roaring_kittens.deps import Deps
 from roaring_kittens.scoring import score_due_calls
+from roaring_kittens.users_service import get_user_broker
 
 log = structlog.get_logger()
 router = Router()
@@ -26,13 +28,19 @@ MAX_POSITIONS = 10
 
 @router.message(Command("seed_retro"))
 async def cmd_seed_retro(message: Message, deps: Deps) -> None:
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if message.from_user.id != owner_id:
-        await message.answer("🔒 Команда доступна только владельцу.")
+    owner_id = message.from_user.id
+    broker = await get_user_broker(deps, owner_id)
+    if broker is None:
+        await message.answer("🔒 Нужен подключённый Tinkoff-токен "
+                             "(инвайт-код от владельца).")
+        return
+    state, _, _ = await budget_state(deps, owner_id)
+    if state == "blocked":
+        await message.answer(HEAVY_BLOCKED_MSG)
         return
     async with deps.session_factory() as session:
         seeded_keys = await get_retro_seeded_keys(session)
-    snap = await deps.broker.get_portfolio()
+    snap = await broker.get_portfolio()
     if not snap.positions:
         await message.answer("Портфель пуст — сеять нечего.")
         return
@@ -56,15 +64,17 @@ async def cmd_seed_retro(message: Message, deps: Deps) -> None:
             if tech is None:
                 continue
             try:
-                report = await run_analyst(deps.llm, pos.ticker, tech, [], None)
+                with use_user(owner_id):
+                    report = await run_analyst(deps.llm, pos.ticker, tech, [], None)
             except Exception as exc:
                 log.error("seed_analyst_failed", ticker=pos.ticker, error=str(exc))
                 continue
             embedding = None
             try:
-                embedding = await deps.embedder.embed(
-                    f"{pos.ticker} {report.stance}: {report.summary}",
-                    operation="embed_call")
+                with use_user(owner_id):
+                    embedding = await deps.embedder.embed(
+                        f"{pos.ticker} {report.stance}: {report.summary}",
+                        operation="embed_call")
             except Exception as exc:
                 log.warning("embed_call_failed", error=str(exc))
             async with deps.session_factory() as session:

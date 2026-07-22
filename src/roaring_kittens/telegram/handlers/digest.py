@@ -2,22 +2,23 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from roaring_kittens.db.owner import fetch_owner_id
 from roaring_kittens.deps import Deps
 from roaring_kittens.digest.morning import run_morning_digest
+from roaring_kittens.users_service import get_user_broker
 
 router = Router()
 
-NOT_OWNER = ("🔒 Дайджест строится по портфелю владельца бота и доступен только ему.\n"
+NO_BROKER = ("🔒 Дайджест строится по твоему портфелю — нужен подключённый "
+             "Tinkoff-токен (инвайт-код от владельца).\n"
              "Тебе доступен /ask — разбор любой бумаги Мосбиржи.")
 
 
 @router.message(Command("digest"))
 @router.message(F.text == "📅 Дайджест")
 async def cmd_digest(message: Message, deps: Deps) -> None:
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if owner_id is None or message.from_user.id != owner_id:
-        await message.answer(NOT_OWNER)
+    broker = await get_user_broker(deps, message.from_user.id)
+    if broker is None:
+        await message.answer(NO_BROKER)
         return
     await message.answer("⏳ Собираю дайджест…")
-    await run_morning_digest(deps, message.bot, message.chat.id)
+    await run_morning_digest(deps, message.bot, message.chat.id, broker=broker)

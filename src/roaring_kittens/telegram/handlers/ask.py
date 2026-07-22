@@ -7,14 +7,17 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from roaring_kittens.ai.analyst import run_analyst
+from roaring_kittens.ai.usage_context import use_budget_mode, use_user
 from roaring_kittens.broker.position_note import position_note_from_snapshot
 from roaring_kittens.broker.tech import compute_tech_summary
+from roaring_kittens.budget import budget_state
 from roaring_kittens.db.calls import get_last_call, save_call
-from roaring_kittens.db.owner import fetch_owner_id
+from roaring_kittens.db.users import get_active_user
 from roaring_kittens.deps import Deps
 from roaring_kittens.news.repository import get_news_for_tickers
 from roaring_kittens.telegram.formatting import format_analyst_report, format_prev_call_note
 from roaring_kittens.universe.universe import Instrument
+from roaring_kittens.users_service import get_user_broker
 
 log = structlog.get_logger()
 router = Router()
@@ -66,14 +69,16 @@ def build_ticker_keyboard(tickers: list[str], cap: int = 12,
 
 
 async def _guest_over_limit(deps: Deps, user_id: int) -> bool:
-    owner_id = await fetch_owner_id(deps.session_factory)
-    return user_id != owner_id and not deps.ask_limiter.allow(user_id)
+    """Лимит только для гостей: зарегистрированных гейтит их бюджет."""
+    async with deps.session_factory() as session:
+        registered = await get_active_user(session, user_id) is not None
+    return not registered and not deps.ask_limiter.allow(user_id)
 
 
-async def build_position_note(deps: Deps, ticker: str) -> str | None:
-    """Блок о реальной позиции владельца. None при сбое (не блокируем разбор)."""
+async def build_position_note(broker, ticker: str) -> str | None:
+    """Блок о реальной позиции спрашивающего. None при сбое (не блокируем разбор)."""
     try:
-        snap = await deps.broker.get_portfolio()
+        snap = await broker.get_portfolio()
     except Exception as exc:
         log.warning("position_note_failed", error=str(exc))
         return None
@@ -83,6 +88,14 @@ async def build_position_note(deps: Deps, ticker: str) -> str | None:
 async def _analyze_and_edit(progress: Message, deps: Deps, instrument: Instrument,
                             question: str | None, asked_by: int) -> None:
     """Общее ядро /ask: контекст → аналитик → запись вызова → рендер."""
+    async with deps.session_factory() as session:
+        registered = await get_active_user(session, asked_by) is not None
+    uid_ctx = asked_by if registered else None
+    mode = "ok"
+    if registered:
+        state, _, _ = await budget_state(deps, asked_by)
+        # blocked НЕ оставляет полный gpt-4o: /ask деградирует до mini
+        mode = "econom" if state in ("econom", "blocked") else "ok"
     try:
         candles = await deps.broker.get_daily_candles(instrument.figi)
         tech = compute_tech_summary(candles)
@@ -90,11 +103,12 @@ async def _analyze_and_edit(progress: Message, deps: Deps, instrument: Instrumen
         async with deps.session_factory() as session:
             news = await get_news_for_tickers(session, [instrument.ticker], since=since)
             prev = await get_last_call(session, instrument.ticker)
-        owner_id = await fetch_owner_id(deps.session_factory)
-        position_note = await build_position_note(deps, instrument.ticker) \
-            if asked_by == owner_id else None
-        report = await run_analyst(deps.llm, instrument.ticker, tech, news,
-                                   question, position_note)
+        broker = await get_user_broker(deps, asked_by) if registered else None
+        position_note = await build_position_note(broker, instrument.ticker) \
+            if broker is not None else None
+        with use_user(uid_ctx), use_budget_mode(mode):
+            report = await run_analyst(deps.llm, instrument.ticker, tech, news,
+                                       question, position_note)
     except Exception as exc:
         log.error("ask_failed", ticker=instrument.ticker, error=str(exc))
         await progress.edit_text(
@@ -105,9 +119,10 @@ async def _analyze_and_edit(progress: Message, deps: Deps, instrument: Instrumen
 
     embedding = None
     try:
-        embedding = await deps.embedder.embed(
-            f"{instrument.ticker} {report.stance}: {report.summary}",
-            operation="embed_call")
+        with use_user(uid_ctx):
+            embedding = await deps.embedder.embed(
+                f"{instrument.ticker} {report.stance}: {report.summary}",
+                operation="embed_call")
     except Exception as exc:
         log.warning("embed_call_failed", error=str(exc))
     try:  # запись вызова не должна ронять ответ пользователю
@@ -157,12 +172,12 @@ async def btn_ask(message: Message, deps: Deps) -> None:
 
 
 async def show_ticker_picker(message: Message, deps: Deps) -> None:
-    """Владельцу — тикеры его портфеля, гостям — популярные из IMOEX."""
+    """Подключённым — тикеры ИХ портфеля, гостям — популярные из IMOEX."""
     tickers = [t for t in POPULAR_TICKERS if deps.universe.get(t)]
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if message.from_user.id == owner_id:
+    broker = await get_user_broker(deps, message.from_user.id)
+    if broker is not None:
         try:
-            snap = await deps.broker.get_portfolio()
+            snap = await broker.get_portfolio()
             portfolio_tickers = [p.ticker for p in snap.positions
                                  if deps.universe.get(p.ticker)]
             if portfolio_tickers:

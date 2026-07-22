@@ -2,7 +2,7 @@ from aiogram import Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
-from roaring_kittens.db.owner import fetch_owner_id
+from roaring_kittens.db.users import get_active_user
 from roaring_kittens.db.watchlist import (
     add_to_watchlist, list_watchlist, remove_from_watchlist,
 )
@@ -10,7 +10,8 @@ from roaring_kittens.deps import Deps
 
 router = Router()
 
-NOT_OWNER = "🔒 Watchlist доступен только владельцу — алерты по нему идут владельцу."
+NOT_USER = ("🔒 Watchlist доступен подключённым пользователям "
+            "(нужен инвайт-код от владельца).")
 
 
 def format_watchlist(tickers: list[str]) -> str:
@@ -24,18 +25,20 @@ def format_watchlist(tickers: list[str]) -> str:
     return "\n".join(lines)
 
 
-async def _owner_or_none(message: Message, deps: Deps) -> int | None:
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if message.from_user.id != owner_id:
-        await message.answer(NOT_OWNER)
+async def _active_user_or_none(message: Message, deps: Deps) -> int | None:
+    """Watch не требует токена — алерты полезны и без портфеля."""
+    async with deps.session_factory() as session:
+        user = await get_active_user(session, message.from_user.id)
+    if user is None:
+        await message.answer(NOT_USER)
         return None
-    return owner_id
+    return user.telegram_id
 
 
 @router.message(Command("watch"))
 async def cmd_watch(message: Message, command: CommandObject, deps: Deps) -> None:
-    owner_id = await _owner_or_none(message, deps)
-    if owner_id is None:
+    user_id = await _active_user_or_none(message, deps)
+    if user_id is None:
         return
     if not command.args:
         await message.answer("Формат: <code>/watch SBER</code>")
@@ -45,7 +48,7 @@ async def cmd_watch(message: Message, command: CommandObject, deps: Deps) -> Non
         await message.answer(f"Не знаю бумагу «{command.args.split()[0]}».")
         return
     async with deps.session_factory() as session:
-        added = await add_to_watchlist(session, owner_id, instrument.ticker)
+        added = await add_to_watchlist(session, user_id, instrument.ticker)
         await session.commit()
     await message.answer(
         f"👁 {instrument.ticker} {'добавлен в watchlist' if added else 'уже в watchlist'}. "
@@ -54,8 +57,8 @@ async def cmd_watch(message: Message, command: CommandObject, deps: Deps) -> Non
 
 @router.message(Command("unwatch"))
 async def cmd_unwatch(message: Message, command: CommandObject, deps: Deps) -> None:
-    owner_id = await _owner_or_none(message, deps)
-    if owner_id is None:
+    user_id = await _active_user_or_none(message, deps)
+    if user_id is None:
         return
     if not command.args:
         await message.answer("Формат: <code>/unwatch SBER</code>")
@@ -65,16 +68,16 @@ async def cmd_unwatch(message: Message, command: CommandObject, deps: Deps) -> N
     instrument = deps.universe.resolve(raw)
     ticker = instrument.ticker if instrument else raw.upper()
     async with deps.session_factory() as session:
-        removed = await remove_from_watchlist(session, owner_id, ticker)
+        removed = await remove_from_watchlist(session, user_id, ticker)
         await session.commit()
     await message.answer(f"👁 {ticker} {'убран' if removed else 'и не был в watchlist'}.")
 
 
 @router.message(Command("watchlist"))
 async def cmd_watchlist(message: Message, deps: Deps) -> None:
-    owner_id = await _owner_or_none(message, deps)
-    if owner_id is None:
+    user_id = await _active_user_or_none(message, deps)
+    if user_id is None:
         return
     async with deps.session_factory() as session:
-        tickers = await list_watchlist(session, owner_id)
+        tickers = await list_watchlist(session, user_id)
     await message.answer(format_watchlist(tickers))

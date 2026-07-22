@@ -7,19 +7,21 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
 from roaring_kittens.db.calls import HistoryItem, get_ticker_history
-from roaring_kittens.db.council import get_council_transcript
+from roaring_kittens.db.council import get_council_run
 from roaring_kittens.db.insights import InsightRecord, list_active_insights
-from roaring_kittens.db.owner import fetch_owner_id
 from roaring_kittens.db.theses import (
     ThesisRecord, close_thesis, get_active_theses, get_active_thesis, save_thesis,
 )
+from roaring_kittens.db.users import get_active_user
 from roaring_kittens.deps import Deps
 from roaring_kittens.telegram.formatting import STANCE_EMOJI, esc
 
 log = structlog.get_logger()
 router = Router()
 
-NOT_OWNER = "🔒 Доступно только владельцу (данные привязаны к его портфелю и разборам)."
+NOT_USER = ("🔒 Доступно подключённым пользователям "
+            "(нужен инвайт-код от владельца).")
+NOT_ADMIN = "🔒 Только для admin (уроки выводятся из его данных)."
 
 
 def format_theses(theses: list[ThesisRecord]) -> str:
@@ -66,23 +68,31 @@ def format_history(ticker: str, items: list[HistoryItem]) -> str:
     return "\n".join(lines)
 
 
+async def _active_user(message: Message, deps: Deps):
+    async with deps.session_factory() as session:
+        user = await get_active_user(session, message.from_user.id)
+    if user is None:
+        await message.answer(NOT_USER)
+    return user
+
+
 @router.message(Command("thesis"))
 async def cmd_thesis(message: Message, deps: Deps) -> None:
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if message.from_user.id != owner_id:
-        await message.answer(NOT_OWNER)
+    user = await _active_user(message, deps)
+    if user is None:
         return
     async with deps.session_factory() as session:
-        theses = await get_active_theses(session)
+        theses = await get_active_theses(session, owner_id=user.telegram_id)
     await message.answer(format_theses(theses))
 
 
 @router.message(Command("insights"))
 async def cmd_insights(message: Message, deps: Deps) -> None:
-    # owner-only: уроки выводятся из сделок владельца — могут раскрывать его результаты
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if message.from_user.id != owner_id:
-        await message.answer(NOT_OWNER)
+    # admin-only: уроки выводятся из его закрытых тезисов (решение 3 плана 4b)
+    async with deps.session_factory() as session:
+        user = await get_active_user(session, message.from_user.id)
+    if user is None or user.role != "admin":
+        await message.answer(NOT_ADMIN)
         return
     async with deps.session_factory() as session:
         items = await list_active_insights(session)
@@ -91,11 +101,8 @@ async def cmd_insights(message: Message, deps: Deps) -> None:
 
 @router.message(Command("history"))
 async def cmd_history(message: Message, command: CommandObject, deps: Deps) -> None:
-    # owner-only: summary council-разборов может содержать позицию владельца
-    # (протокол комитета owner-gated ровно по этой причине)
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if message.from_user.id != owner_id:
-        await message.answer(NOT_OWNER)
+    user = await _active_user(message, deps)
+    if user is None:
         return
     if not command.args:
         await message.answer("Формат: <code>/history SBER</code>")
@@ -104,31 +111,37 @@ async def cmd_history(message: Message, command: CommandObject, deps: Deps) -> N
     if instrument is None:
         await message.answer(f"Не знаю бумагу «{command.args.split()[0]}».")
         return
+    # свои разборы; admin видит все (summary чужих council-разборов ему можно)
+    asked_by = None if user.role == "admin" else user.telegram_id
     async with deps.session_factory() as session:
-        items = await get_ticker_history(session, instrument.ticker, limit=5)
+        items = await get_ticker_history(session, instrument.ticker, limit=5,
+                                         asked_by=asked_by)
     await message.answer(format_history(instrument.ticker, items))
 
 
 @router.callback_query(F.data.startswith("thesis_save:"))
 async def cb_thesis_save(callback: CallbackQuery, deps: Deps) -> None:
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if callback.from_user.id != owner_id:
-        await callback.answer("Только владельцу", show_alert=True)
-        return
-    await callback.answer()
+    uid = callback.from_user.id
     try:
         run_id = UUID(callback.data.split(":", 1)[1])
     except ValueError:
+        await callback.answer()
         return
     async with deps.session_factory() as session:
-        transcript = await get_council_transcript(session, run_id)
-    if not transcript or "meta" not in transcript:
+        run = await get_council_run(session, run_id)
+    if not run or "meta" not in run[0]:
+        await callback.answer()
         await callback.message.answer("Не нашёл данные комитета для тезиса.")
         return
+    transcript, asked_by = run
+    if uid != asked_by:  # тезис из ЧУЖОГО прогона не принять — там чужая позиция
+        await callback.answer("Кнопка инициатора разбора", show_alert=True)
+        return
+    await callback.answer()
     meta, proposal = transcript["meta"], transcript["proposal"]
     async with deps.session_factory() as session:
         # guard от двойного тапа/старой кнопки: тот же тезис не пересохраняем
-        existing = await get_active_thesis(session, meta["ticker"])
+        existing = await get_active_thesis(session, meta["ticker"], owner_id=uid)
         if existing and existing.thesis == proposal["thesis"]:
             await callback.message.answer("📌 Этот тезис уже принят. /thesis — все.")
             return
@@ -138,7 +151,7 @@ async def cb_thesis_save(callback: CallbackQuery, deps: Deps) -> None:
                           invalidation=proposal["invalidation"], source="council",
                           confidence=proposal["confidence"], entry_price=entry,
                           backed_by_position=meta.get("held", False),
-                          owner_id=callback.from_user.id)
+                          owner_id=uid)
         await session.commit()
     await callback.message.answer(
         f"📌 Тезис по <b>{meta['ticker']}</b> принят:\n🎯 {esc(proposal['thesis'])}\n"
@@ -148,17 +161,15 @@ async def cb_thesis_save(callback: CallbackQuery, deps: Deps) -> None:
 
 @router.callback_query(F.data.startswith("thesis_del:"))
 async def cb_thesis_del(callback: CallbackQuery, deps: Deps) -> None:
-    owner_id = await fetch_owner_id(deps.session_factory)
-    if callback.from_user.id != owner_id:
-        await callback.answer("Только владельцу", show_alert=True)
-        return
     await callback.answer()
     try:
         thesis_id = UUID(callback.data.split(":", 1)[1])
     except ValueError:
         return
     async with deps.session_factory() as session:
+        # owner-условие в WHERE: чужой thesis_id молча не закроется
         await close_thesis(session, thesis_id, status="closed",
-                           realized_return_pct=None, close_reason="удалён владельцем")
+                           realized_return_pct=None, close_reason="удалён владельцем",
+                           owner_id=callback.from_user.id)
         await session.commit()
     await callback.message.answer("🗑 Тезис закрыт.")
