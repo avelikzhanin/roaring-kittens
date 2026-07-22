@@ -95,14 +95,17 @@ async def save_score(session: AsyncSession, call_id: UUIDType, horizon_days: int
     await session.execute(stmt)
 
 
-async def get_scored_calls(session: AsyncSession) -> list[ScoredCall]:
+async def get_scored_calls(session: AsyncSession, *,
+                           asked_by: int | None = None) -> list[ScoredCall]:
+    """asked_by: скоуп для рефлексии (админ учится на своих); /track — общий (None)."""
     j = calls.join(call_scores, calls.c.id == call_scores.c.call_id)
-    rows = (await session.execute(
-        select(calls.c.ticker, calls.c.stance, calls.c.created_at, calls.c.source,
-               call_scores.c.horizon_days, call_scores.c.stock_return_pct,
-               call_scores.c.imoex_return_pct, call_scores.c.verdict,
-               call_scores.c.scored_at)
-        .select_from(j))).fetchall()
+    stmt = select(calls.c.ticker, calls.c.stance, calls.c.created_at, calls.c.source,
+                  call_scores.c.horizon_days, call_scores.c.stock_return_pct,
+                  call_scores.c.imoex_return_pct, call_scores.c.verdict,
+                  call_scores.c.scored_at).select_from(j)
+    if asked_by is not None:
+        stmt = stmt.where(calls.c.asked_by == asked_by)
+    rows = (await session.execute(stmt)).fetchall()
     return [ScoredCall(*r) for r in rows]
 
 
@@ -205,9 +208,14 @@ async def get_ticker_history(session: AsyncSession, ticker: str,
             for r in rows]
 
 
-async def get_retro_seeded_keys(session: AsyncSession) -> set[tuple[str, date]]:
-    """(ticker, дата as-of) уже посеянных retro-вызовов — для идемпотентного /seed_retro."""
-    rows = (await session.execute(
-        select(calls.c.ticker, cast(calls.c.created_at, Date))
-        .where(calls.c.source == "retro"))).fetchall()
+async def get_retro_seeded_keys(session: AsyncSession, *,
+                                asked_by: int | None = None) -> set[tuple[str, date]]:
+    """(ticker, дата as-of) уже посеянных retro-вызовов — для идемпотентного /seed_retro.
+
+    asked_by: идемпотентность per-user — иначе второй юзер с тем же тикером не сеется."""
+    stmt = select(calls.c.ticker, cast(calls.c.created_at, Date)) \
+        .where(calls.c.source == "retro")
+    if asked_by is not None:
+        stmt = stmt.where(calls.c.asked_by == asked_by)
+    rows = (await session.execute(stmt)).fetchall()
     return {(r[0], r[1]) for r in rows}

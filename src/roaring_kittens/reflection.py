@@ -71,29 +71,30 @@ async def weekly_reflection_job(deps, bot) -> None:
         return
     week_ago = datetime.now(tz=timezone.utc) - timedelta(days=7)
     async with deps.session_factory() as session:
-        # admin-scoped (решение 3 плана 4b): уроки — из закрытых тезисов владельца
+        # admin-scoped (решение 3 плана 4b): уроки — из тезисов И вызовов владельца
         closed = await get_recently_closed(session, days=7, owner_id=owner_id)
-        scored = [s for s in await get_scored_calls(session)
+        scored = [s for s in await get_scored_calls(session, asked_by=owner_id)
                   if s.scored_at and s.scored_at >= week_ago
                   and s.horizon_days == 20]  # один горизонт — без дублей
     with use_user(owner_id):
         result = await run_reflection(deps.llm, closed, scored)
-    if result is None:
-        log.info("reflection_skipped_no_material")
-        return
-    saved = 0
-    for draft in result.insights[:3]:
-        embedding = None
-        try:
-            embedding = await deps.embedder.embed(draft.summary, operation="embed_insight")
-        except Exception as exc:
-            log.warning("embed_insight_failed", error=str(exc))
-        async with deps.session_factory() as session:
-            await save_insight(session, summary=draft.summary, scope=draft.scope,
-                               scope_value=draft.scope_value,
-                               confidence=draft.confidence, embedding=embedding)
-            await session.commit()
-        saved += 1
+        if result is None:
+            log.info("reflection_skipped_no_material")
+            return
+        saved = 0
+        for draft in result.insights[:3]:  # embed тоже в use_user — метерится админу
+            embedding = None
+            try:
+                embedding = await deps.embedder.embed(draft.summary,
+                                                      operation="embed_insight")
+            except Exception as exc:
+                log.warning("embed_insight_failed", error=str(exc))
+            async with deps.session_factory() as session:
+                await save_insight(session, summary=draft.summary, scope=draft.scope,
+                                   scope_value=draft.scope_value,
+                                   confidence=draft.confidence, embedding=embedding)
+                await session.commit()
+            saved += 1
     lines = ["📅 <b>Еженедельная рефлексия</b>", "", esc(result.weekly_summary)]
     if result.insights:
         lines += ["", "💡 <b>Новые уроки:</b>"]

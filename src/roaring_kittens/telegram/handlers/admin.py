@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
@@ -41,6 +41,8 @@ async def _require_admin(message: Message, deps: Deps) -> bool:
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, command: CommandObject, deps: Deps) -> None:
+    if message.chat.type != "private":
+        return  # инвайт-коды и роспись юзеров в группу не публикуем
     if not await _require_admin(message, deps):
         return
     args = (command.args or "").split()
@@ -72,8 +74,16 @@ async def cmd_admin(message: Message, command: CommandObject, deps: Deps) -> Non
             await message.answer(f"⛔️ {uid} отключён, его токен стёрт из БД.\n"
                                  f"Посоветуй ему также отозвать токен в Tinkoff.")
         elif sub == "set_budget" and len(args) > 2 and args[1].isdigit():
-            await set_user_budget(session, int(args[1]), Decimal(args[2]))
+            try:
+                budget = Decimal(args[2])
+            except InvalidOperation:
+                budget = None
+            if budget is None or budget < 0:
+                await message.answer("Сумма должна быть числом ≥ 0 (0 = блок). "
+                                     + USAGE)
+                return
+            await set_user_budget(session, int(args[1]), budget)
             await session.commit()
-            await message.answer(f"💰 Бюджет {args[1]} = ${args[2]}/мес.")
+            await message.answer(f"💰 Бюджет {args[1]} = ${budget}/мес.")
         else:
             await message.answer(USAGE)

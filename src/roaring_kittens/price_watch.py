@@ -122,9 +122,14 @@ async def price_watch_job(deps, bot) -> None:
             if move is None or _deduper.seen(user_id, ticker, today):
                 continue
             arrow = "📈" if move > 0 else "📉"
-            await send_alert(
-                deps, bot, user_id,
-                f"{arrow} <b>{ticker}</b> {'+' if move > 0 else '−'}{abs(move)}% за день "
-                f"({esc(str(prev))} → {esc(str(last))} ₽). Разбор: /council {ticker}")
-            _deduper.mark(user_id, ticker, today)  # после отправки: сбой не глушит на день
+            try:  # 403 одного юзера (заблокировал бота) не роняет цикл остальным
+                await send_alert(
+                    deps, bot, user_id,
+                    f"{arrow} <b>{ticker}</b> {'+' if move > 0 else '−'}{abs(move)}% "
+                    f"за день ({esc(str(prev))} → {esc(str(last))} ₽). "
+                    f"Разбор: /council {ticker}")
+                _deduper.mark(user_id, ticker, today)  # после отправки: сбой не глушит
+            except Exception as exc:
+                log.error("price_alert_failed", user=user_id, ticker=ticker,
+                          error=str(exc))
     log.info("price_watch_done", users=len(interests), figis=len(all_figi))

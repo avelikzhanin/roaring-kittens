@@ -11,7 +11,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from roaring_kittens.ai.analyst import run_analyst
-from roaring_kittens.ai.usage_context import use_user
+from roaring_kittens.ai.usage_context import use_budget_mode, use_user
 from roaring_kittens.broker.tech import compute_tech_summary
 from roaring_kittens.budget import HEAVY_BLOCKED_MSG, budget_state
 from roaring_kittens.db.calls import get_retro_seeded_keys, save_call
@@ -38,8 +38,10 @@ async def cmd_seed_retro(message: Message, deps: Deps) -> None:
     if state == "blocked":
         await message.answer(HEAVY_BLOCKED_MSG)
         return
+    mode = "econom" if state == "econom" else "ok"
     async with deps.session_factory() as session:
-        seeded_keys = await get_retro_seeded_keys(session)
+        # per-user: у второго юзера с тем же тикером свой посев
+        seeded_keys = await get_retro_seeded_keys(session, asked_by=owner_id)
     snap = await broker.get_portfolio()
     if not snap.positions:
         await message.answer("Портфель пуст — сеять нечего.")
@@ -64,7 +66,7 @@ async def cmd_seed_retro(message: Message, deps: Deps) -> None:
             if tech is None:
                 continue
             try:
-                with use_user(owner_id):
+                with use_user(owner_id), use_budget_mode(mode):
                     report = await run_analyst(deps.llm, pos.ticker, tech, [], None)
             except Exception as exc:
                 log.error("seed_analyst_failed", ticker=pos.ticker, error=str(exc))

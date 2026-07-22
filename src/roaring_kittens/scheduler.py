@@ -44,7 +44,6 @@ async def _budget_mode_for(deps, bot, uid: int) -> tuple[str, bool]:
     state, _, _ = await budget_state(deps, uid)
     month = datetime.now(tz=timezone.utc).strftime("%Y-%m")
     if state != "ok" and (uid, month) not in _budget_notified:
-        _budget_notified.add((uid, month))
         text = ("🟡 80% месячного AI-бюджета — до 1-го числа перехожу на "
                 "эконом-модели. /budget — детали."
                 if state == "econom" else
@@ -52,6 +51,8 @@ async def _budget_mode_for(deps, bot, uid: int) -> tuple[str, bool]:
                 "заблокированы до 1-го числа. /budget — детали.")
         try:
             await send_alert(deps, bot, uid, text)
+            # помечаем ТОЛЬКО после успеха: сбой -> повторим в следующем цикле
+            _budget_notified.add((uid, month))
         except Exception as exc:
             log.warning("budget_notify_failed", user=uid, error=str(exc))
     return ("econom" if state in ("econom", "blocked") else "ok",
@@ -107,6 +108,7 @@ async def validate_theses(deps, bot, fresh_items: list) -> dict[int, set[str]]:
     async with deps.session_factory() as session:
         theses_to_check = [t for t in await get_active_theses(session)
                            if t.ticker in by_ticker]
+        active_ids = {u.telegram_id for u in await list_active_users(session)}
     # handled = только (юзер, тикер), где валидатор реально ДЕЙСТВОВАЛ: сбой проверки
     # или still_valid не должны глушить impact_scan (там может быть HIGH-событие)
     handled: dict[int, set[str]] = {}
@@ -118,82 +120,94 @@ async def validate_theses(deps, bot, fresh_items: list) -> dict[int, set[str]]:
             log.error("thesis_without_owner", thesis_id=str(thesis.id),
                       ticker=thesis.ticker)
             continue
-        news = by_ticker[thesis.ticker]
-        async with deps.session_factory() as session:
-            recent = await council_ran_recently(session, thesis.ticker, hours=24)
-        if owner_id not in budget_cache:
-            budget_cache[owner_id] = await _budget_mode_for(deps, bot, owner_id)
-        mode, heavy_ok = budget_cache[owner_id]
-        try:
-            with use_user(owner_id), use_budget_mode(mode):
-                check = await run_thesis_check(deps.llm, thesis, news)
+        if owner_id not in active_ids:
+            # revoked: не жжём LLM и не шлём алерты отключённому юзеру
+            log.info("thesis_owner_inactive", owner=owner_id, ticker=thesis.ticker)
+            continue
+        try:  # сбой одного тезиса (напр. юзер заблокировал бота — 403 на send)
+            await _validate_one_thesis(deps, bot, thesis, by_ticker[thesis.ticker],
+                                       budget_cache, handled)
         except Exception as exc:
-            log.error("thesis_check_failed", ticker=thesis.ticker, error=str(exc))
-            continue
-        action = decide_validation_action(check.status, recent)
-        if action == "council" and not heavy_ok:
-            action = "notify"  # blocked: слом сообщаем (critical), комитет не жжём
-        if action == "nothing":
-            continue
-        if action == "notify":
-            handled.setdefault(owner_id, set()).add(thesis.ticker)
-            text = (f"⚠️ Тезис по <b>{thesis.ticker}</b> "
-                    f"{'СЛОМАН' if check.status == 'invalidated' else 'ослаблен'}: "
-                    f"{esc(check.reasoning_short)}\nТезис: {esc(thesis.thesis)}")
-            if check.status == "weakened":
-                last = thesis.last_weakened_at
-                if last and datetime.now(tz=timezone.utc) - last < WEAKENED_COOLDOWN:
-                    log.info("weakened_suppressed_cooldown", ticker=thesis.ticker)
-                    continue
-                async with deps.session_factory() as session:
-                    await mark_thesis_weakened(session, thesis.id)
-                    await session.commit()
-                await send_alert(deps, bot, owner_id, text)
-            else:  # СЛОМАН — critical: сквозь тихие часы и троттлинг
-                if not heavy_ok:
-                    text += BUDGET_SKIPPED_NOTE
-                await send_alert(deps, bot, owner_id, text, critical=True)
-            continue
-        # action == "council": автозапуск комитета (слом тезиса = critical)
-        handled.setdefault(owner_id, set()).add(thesis.ticker)
-        await send_alert(
-            deps, bot, owner_id,
-            f"🚨 Новости ломают тезис по <b>{thesis.ticker}</b>: "
-            f"{esc(check.reasoning_short)}\nСобираю комитет…", critical=True)
-        instrument = deps.universe.resolve(thesis.ticker)
-        if instrument is None:
-            continue
-        try:
-            broker = await get_user_broker(deps, owner_id)
-            with use_user(owner_id), use_budget_mode(mode):
-                outcome = await run_council_flow(deps, instrument, owner_id,
-                                                 broker=broker)
-        except Exception as exc:
-            log.error("auto_council_failed", ticker=thesis.ticker, error=str(exc))
-            continue
-        async with deps.session_factory() as session:
-            await close_thesis(session, thesis.id, status="invalidated",
-                               realized_return_pct=None,
-                               close_reason=f"новости: {check.reasoning_short}")
-            await session.commit()
-        # Комитет предложил замену старому тезису — даём принять кнопкой
-        keyboard = None
-        if outcome.run_id is not None:
-            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-            buttons = [[InlineKeyboardButton(text="📜 Протокол",
-                                             callback_data=f"proto:{outcome.run_id}")]]
-            if outcome.risk.approved and outcome.proposal.action in ("buy", "hold"):
-                buttons.append([InlineKeyboardButton(
-                    text="📌 Принять новый тезис",
-                    callback_data=f"thesis_save:{outcome.run_id}")])
-            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await send_alert(
-            deps, bot, owner_id,
-            format_council_verdict(instrument.ticker, outcome.state["views"],
-                                   outcome.state["debate"], outcome.proposal,
-                                   outcome.risk),
-            critical=True, keyboard=keyboard)
+            log.error("validate_thesis_failed", owner=owner_id,
+                      ticker=thesis.ticker, error=str(exc))
     return handled
+
+
+async def _validate_one_thesis(deps, bot, thesis, news: list,
+                               budget_cache: dict, handled: dict) -> None:
+    owner_id = thesis.owner_id
+    async with deps.session_factory() as session:
+        recent = await council_ran_recently(session, thesis.ticker, hours=24)
+    if owner_id not in budget_cache:
+        budget_cache[owner_id] = await _budget_mode_for(deps, bot, owner_id)
+    mode, heavy_ok = budget_cache[owner_id]
+    with use_user(owner_id), use_budget_mode(mode):
+        check = await run_thesis_check(deps.llm, thesis, news)
+    action = decide_validation_action(check.status, recent)
+    if action == "council" and not heavy_ok:
+        action = "notify"  # blocked: слом сообщаем (critical), комитет не жжём
+    if action == "nothing":
+        return
+    if action == "notify":
+        handled.setdefault(owner_id, set()).add(thesis.ticker)
+        text = (f"⚠️ Тезис по <b>{thesis.ticker}</b> "
+                f"{'СЛОМАН' if check.status == 'invalidated' else 'ослаблен'}: "
+                f"{esc(check.reasoning_short)}\nТезис: {esc(thesis.thesis)}")
+        if check.status == "weakened":
+            last = thesis.last_weakened_at
+            if last and datetime.now(tz=timezone.utc) - last < WEAKENED_COOLDOWN:
+                log.info("weakened_suppressed_cooldown", ticker=thesis.ticker)
+                return
+            # Сначала отправка (sent/buffered = доставлено), потом кулдаун:
+            # сбой отправки не должен глушить «ослаблен» на 24 часа
+            await send_alert(deps, bot, owner_id, text)
+            async with deps.session_factory() as session:
+                await mark_thesis_weakened(session, thesis.id)
+                await session.commit()
+        else:  # СЛОМАН — critical: сквозь тихие часы и троттлинг
+            if not heavy_ok:
+                text += BUDGET_SKIPPED_NOTE
+            await send_alert(deps, bot, owner_id, text, critical=True)
+        return
+    # action == "council": автозапуск комитета (слом тезиса = critical)
+    handled.setdefault(owner_id, set()).add(thesis.ticker)
+    await send_alert(
+        deps, bot, owner_id,
+        f"🚨 Новости ломают тезис по <b>{thesis.ticker}</b>: "
+        f"{esc(check.reasoning_short)}\nСобираю комитет…", critical=True)
+    instrument = deps.universe.resolve(thesis.ticker)
+    if instrument is None:
+        return
+    try:
+        broker = await get_user_broker(deps, owner_id)
+        with use_user(owner_id), use_budget_mode(mode):
+            outcome = await run_council_flow(deps, instrument, owner_id,
+                                             broker=broker)
+    except Exception as exc:
+        log.error("auto_council_failed", ticker=thesis.ticker, error=str(exc))
+        return
+    async with deps.session_factory() as session:
+        await close_thesis(session, thesis.id, status="invalidated",
+                           realized_return_pct=None,
+                           close_reason=f"новости: {check.reasoning_short}")
+        await session.commit()
+    # Комитет предложил замену старому тезису — даём принять кнопкой
+    keyboard = None
+    if outcome.run_id is not None:
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        buttons = [[InlineKeyboardButton(text="📜 Протокол",
+                                         callback_data=f"proto:{outcome.run_id}")]]
+        if outcome.risk.approved and outcome.proposal.action in ("buy", "hold"):
+            buttons.append([InlineKeyboardButton(
+                text="📌 Принять новый тезис",
+                callback_data=f"thesis_save:{outcome.run_id}")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await send_alert(
+        deps, bot, owner_id,
+        format_council_verdict(instrument.ticker, outcome.state["views"],
+                               outcome.state["debate"], outcome.proposal,
+                               outcome.risk),
+        critical=True, keyboard=keyboard)
 
 
 async def _collect_impact_interests(deps,
