@@ -36,7 +36,7 @@ HELP_TEXT = (
     "<b>Для подключённых (инвайт-код + свой Tinkoff-токен):</b>\n"
     "• <code>/portfolio</code> — портфель и P&amp;L · <code>/digest</code> — сводка (сама в 9:00)\n"
     "• <code>/council ТИКЕР</code> — полный разбор комитетом (4 аналитика + дебаты)\n"
-    "• <code>/thesis</code> — почему держим каждую бумагу · "
+    "• <code>/why</code> — почему держим каждую бумагу · "
     "<code>/history ТИКЕР</code> — прошлые разборы\n"
     "• <code>/watch ТИКЕР</code> / <code>/unwatch</code> / <code>/watchlist</code> — "
     "следить за бумагой без покупки\n"

@@ -77,7 +77,7 @@ async def _active_user(message: Message, deps: Deps):
     return user
 
 
-@router.message(Command("thesis"))
+@router.message(Command("why", "thesis"))  # /thesis — легаси-алиас
 async def cmd_thesis(message: Message, deps: Deps) -> None:
     user = await _active_user(message, deps)
     if user is None:
@@ -144,7 +144,7 @@ async def cb_thesis_save(callback: CallbackQuery, deps: Deps) -> None:
         # guard от двойного тапа/старой кнопки: тот же тезис не пересохраняем
         existing = await get_active_thesis(session, meta["ticker"], owner_id=uid)
         if existing and existing.thesis == proposal["thesis"]:
-            await callback.message.answer("📌 Уже на сопровождении. /thesis — все.")
+            await callback.message.answer("📌 Уже на сопровождении. /why — все.")
             return
         entry = Decimal(meta["price_at_call"]) if meta.get("price_at_call") else None
         await save_thesis(session, ticker=meta["ticker"], figi=meta["figi"],
@@ -158,7 +158,7 @@ async def cb_thesis_save(callback: CallbackQuery, deps: Deps) -> None:
         f"📌 Взял <b>{meta['ticker']}</b> на сопровождение:\n"
         f"🎯 {esc(proposal['thesis'])}\n"
         f"🛑 Продаём если: {esc(proposal['invalidation'])}\n"
-        f"Буду проверять каждой новостью. /thesis — все.")
+        f"Буду проверять каждой новостью. /why — все.")
 
 
 @router.callback_query(F.data.startswith("thesis_del:"))
