@@ -79,7 +79,7 @@ def idea_keyboard(deal_id) -> InlineKeyboardMarkup:
 
 
 async def propose_deal_from_council(deps, bot, user_id: int, instrument,
-                                    outcome) -> None:
+                                    outcome, source: str = "council") -> None:
     """Approved BUY -> идея сделки. Молчит, если: тикер уже в портфеле юзера,
     была сделка за 7 дней (включая «Пропущу»), уже есть живая сделка, нет цены
     входа. Ошибки глотает (идея — бонус, не ядро)."""
@@ -111,7 +111,7 @@ async def propose_deal_from_council(deps, bot, user_id: int, instrument,
         async with deps.session_factory() as session:
             deal = await create_proposal(
                 session, user_id=user_id, ticker=instrument.ticker,
-                figi=instrument.figi, source="council",
+                figi=instrument.figi, source=source,
                 council_run_id=outcome.run_id, entry_suggested=entry,
                 qty_suggested=Decimal(sized.qty) if sized else None,
                 target_price=target, exit_price=exit_price,

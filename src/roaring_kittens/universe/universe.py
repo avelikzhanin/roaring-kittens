@@ -16,6 +16,13 @@ def parse_iss_tickers(payload: dict) -> list[str]:
     return [row[idx] for row in block["data"]]
 
 
+def parse_iss_weights(payload: dict) -> dict[str, float]:
+    block = payload["analytics"]
+    ti = block["columns"].index("ticker")
+    wi = block["columns"].index("weight")
+    return {row[ti]: float(row[wi] or 0) for row in block["data"]}
+
+
 @dataclass(frozen=True)
 class Instrument:
     ticker: str
@@ -31,6 +38,7 @@ class Universe:
         self._transport = transport
         self._by_ticker: dict[str, Instrument] = {}
         self._alias_index: dict[str, str] = {}  # alias -> ticker
+        self._weights: dict[str, float] = {}    # ticker -> вес IMOEX (для сканера)
 
     async def load(self) -> None:
         tickers = await self._fetch_index_tickers()
@@ -51,10 +59,20 @@ class Universe:
             async with httpx.AsyncClient(transport=self._transport, timeout=10) as client:
                 resp = await client.get(ISS_URL)
                 resp.raise_for_status()
-                return parse_iss_tickers(resp.json())
+                payload = resp.json()
+                self._weights = parse_iss_weights(payload)
+                return parse_iss_tickers(payload)
         except Exception as exc:
+            # фолбэк на SEED: веса пустые — сканер молчит до успешной перезагрузки
             log.warning("iss_unavailable_using_seed", error=str(exc))
+            self._weights = {}
             return list(SEED_TICKERS)
+
+    def top_by_weight(self, n: int) -> list[Instrument]:
+        """Топ-N загруженных инструментов по весу IMOEX (голубые фишки)."""
+        ranked = sorted((t for t in self._by_ticker if t in self._weights),
+                        key=lambda t: self._weights[t], reverse=True)
+        return [self._by_ticker[t] for t in ranked[:n]]
 
     def tickers(self) -> list[str]:
         return list(self._by_ticker)

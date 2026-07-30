@@ -117,10 +117,11 @@ async def _sync_user(deps, bot, owner_id: int, broker) -> None:
                                close_reason="позиция закрыта")
             await session.commit()
         sign = "" if ret is None else (f", результат {'+' if ret >= 0 else '−'}{abs(ret)}%"
-                                       " за время тезиса")
+                                       " за время позиции")
         await bot.send_message(owner_id,
-                               f"📕 Позиция {thesis.ticker} закрыта — тезис закрыт{sign}.\n"
-                               f"Тезис был: {esc(thesis.thesis)}")
+                               f"📕 Позиция {thesis.ticker} закрыта — сопровождение "
+                               f"завершено{sign}.\n"
+                               f"Причина была: {esc(thesis.thesis)}")
 
     for pos in actions.to_draft:
         instrument = deps.universe.get(pos.ticker) or Instrument(
@@ -143,13 +144,13 @@ async def _sync_user(deps, bot, owner_id: int, broker) -> None:
             await session.commit()
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-            text="🗑 Удалить тезис", callback_data=f"thesis_del:{rec.id}")]])
+            text="🗑 Не согласен — убрать", callback_data=f"thesis_del:{rec.id}")]])
         await bot.send_message(
             owner_id,
-            f"📌 Обнаружена позиция <b>{pos.ticker}</b> (вес ≥5%) без тезиса.\n"
-            f"Сгенерировал тезис: {esc(draft.thesis)}\n"
+            f"📌 Обнаружена позиция <b>{pos.ticker}</b> (вес ≥5%) без сопровождения.\n"
+            f"Почему держим: {esc(draft.thesis)}\n"
             f"🛑 Продаём если: {esc(draft.invalidation)}\n"
-            f"Буду проверять его каждой новостью. Не согласен — удали.",
+            f"Буду проверять каждой новостью.",
             reply_markup=kb)
     log.info("positions_synced", closed=len(actions.to_close),
              drafted=len(actions.to_draft), backed=len(actions.to_back))

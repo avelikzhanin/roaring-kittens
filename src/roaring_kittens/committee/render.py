@@ -18,7 +18,7 @@ def format_council_verdict(ticker: str, views: list[SpecialistView], debate: lis
         "",
         esc(proposal.rationale),
         "",
-        f"🎯 Тезис: {esc(proposal.thesis)}",
+        f"🎯 Суть: {esc(proposal.thesis)}",
         f"🛑 Продаём если: {esc(proposal.invalidation)}",
         "",
         f"Голоса: {votes} · дебаты: {rounds} раунд(а)",

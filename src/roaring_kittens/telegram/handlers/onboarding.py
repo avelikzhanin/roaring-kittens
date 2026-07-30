@@ -143,8 +143,8 @@ async def handle_token(message: Message, deps: Deps, state: FSMContext) -> None:
     await message.answer(
         f"🎉 Подключился к твоему счёту! Позиции: {positions}.\n\n"
         f"Тебе доступно: /portfolio /digest /ask /thesis /watch /budget.\n"
-        f"Утренний дайджест — сам в 9:00 МСК. Тезисы для позиций ≥5% появятся "
-        f"после ближайшей утренней сверки.")
+        f"Утренний дайджест — сам в 9:00 МСК. Твои позиции я возьму под "
+        f"сопровождение после ближайшей утренней сверки.")
 
 
 @router.message(F.chat.type == "private", F.text.regexp(r"^t\.[A-Za-z0-9_\-]{16,}$"))

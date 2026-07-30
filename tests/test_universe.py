@@ -40,3 +40,6 @@ async def test_universe_load_maps_figi_and_builds_aliases():
     assert uni.resolve("сбер банк") == sber     # резолв по алиасу
     assert uni.resolve("SBER") == sber          # резолв по тикеру
     assert uni.resolve("nope") is None
+    # веса IMOEX: топ по убыванию (SBER 14.2 > GAZP 9.1) — для сканера
+    assert [i.ticker for i in uni.top_by_weight(5)] == ["SBER", "GAZP"]
+    assert uni.top_by_weight(1)[0].ticker == "SBER"

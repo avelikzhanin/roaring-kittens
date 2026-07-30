@@ -154,9 +154,10 @@ async def _validate_one_thesis(deps, bot, thesis, news: list,
         return
     if action == "notify":
         handled.setdefault(owner_id, set()).add(thesis.ticker)
-        text = (f"⚠️ Тезис по <b>{thesis.ticker}</b> "
-                f"{'СЛОМАН' if check.status == 'invalidated' else 'ослаблен'}: "
-                f"{esc(check.reasoning_short)}\nТезис: {esc(thesis.thesis)}")
+        broken = check.status == "invalidated"
+        text = (f"{'🚨 Причина держать' if broken else '⚠️ Причина держать'} "
+                f"<b>{thesis.ticker}</b> {'сломана' if broken else 'под вопросом'}: "
+                f"{esc(check.reasoning_short)}\nПричина была: {esc(thesis.thesis)}")
         if check.status == "weakened":
             last = thesis.last_weakened_at
             if last and datetime.now(tz=timezone.utc) - last < WEAKENED_COOLDOWN:
@@ -177,7 +178,7 @@ async def _validate_one_thesis(deps, bot, thesis, news: list,
     handled.setdefault(owner_id, set()).add(thesis.ticker)
     await send_alert(
         deps, bot, owner_id,
-        f"🚨 Новости ломают тезис по <b>{thesis.ticker}</b>: "
+        f"🚨 Новости ломают причину держать <b>{thesis.ticker}</b>: "
         f"{esc(check.reasoning_short)}\nСобираю комитет…", critical=True)
     instrument = deps.universe.resolve(thesis.ticker)
     if instrument is None:
@@ -203,7 +204,7 @@ async def _validate_one_thesis(deps, bot, thesis, news: list,
                                          callback_data=f"proto:{outcome.run_id}")]]
         if outcome.risk.approved and outcome.proposal.action in ("buy", "hold"):
             buttons.append([InlineKeyboardButton(
-                text="📌 Принять новый тезис",
+                text="📌 Взять на сопровождение",
                 callback_data=f"thesis_save:{outcome.run_id}")])
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await send_alert(
@@ -329,7 +330,7 @@ async def _react_for_user(deps, bot, uid: int, ticker: str, check,
                                          callback_data=f"proto:{outcome.run_id}")]]
         if outcome.risk.approved and outcome.proposal.action in ("buy", "hold"):
             buttons.append([InlineKeyboardButton(
-                text="📌 Принять тезис",
+                text="📌 Взять на сопровождение",
                 callback_data=f"thesis_save:{outcome.run_id}")])
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     # Вердикт — всегда critical: анонс уже ушёл, прогон уже оплачен; кнопки —
@@ -433,4 +434,8 @@ def build_scheduler(deps: Deps, bot) -> AsyncIOScheduler:
     scheduler.add_job(weekly_reflection_job, "cron", day_of_week="sun",
                       hour=23, minute=0, args=[deps, bot],
                       id="weekly_reflection", max_instances=1, coalesce=True)
+    from roaring_kittens.scanner import scanner_job
+    scheduler.add_job(scanner_job, "cron", day_of_week="mon-fri",
+                      hour=10, minute=40, args=[deps, bot],
+                      id="scanner", max_instances=1, coalesce=True)
     return scheduler

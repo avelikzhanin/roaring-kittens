@@ -62,7 +62,8 @@ async def cmd_council(message: Message, command: CommandObject, deps: Deps) -> N
                                          callback_data=f"proto:{outcome.run_id}")]]
         if outcome.risk.approved and outcome.proposal.action in ("buy", "hold"):
             buttons.append([InlineKeyboardButton(
-                text="📌 Принять тезис", callback_data=f"thesis_save:{outcome.run_id}")])
+                text="📌 Взять на сопровождение",
+                callback_data=f"thesis_save:{outcome.run_id}")])
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await progress.edit_text(
         format_council_verdict(instrument.ticker, outcome.state["views"],

@@ -26,24 +26,25 @@ NOT_ADMIN = "🔒 Только для admin (уроки выводятся из 
 
 def format_theses(theses: list[ThesisRecord]) -> str:
     if not theses:
-        return ("📌 Активных тезисов нет.\n"
-                "Тезис появляется из /council (кнопка «Принять тезис») или "
-                "автоматически для позиций ≥5% портфеля.")
-    lines = ["📌 <b>Активные тезисы:</b>", ""]
+        return ("📌 Пока нет бумаг под сопровождением.\n"
+                "Сопровождение появляется из /council (кнопка «Взять на "
+                "сопровождение») или автоматически для позиций ≥5% портфеля.")
+    lines = ["📌 <b>Почему держим:</b>", ""]
     for t in theses:
-        idea = "" if t.backed_by_position else " · идея"
+        idea = "" if t.backed_by_position else " · ещё не куплено"
         lines.append(f"<b>{t.ticker}</b> (с {t.opened_at:%d.%m}, {t.source}{idea})")
         lines.append(f"🎯 {esc(t.thesis)}")
         lines.append(f"🛑 Продаём если: {esc(t.invalidation)}")
         lines.append("")
-    lines.append("Каждая свежая новость по тикеру проверяет тезис автоматически.")
+    lines.append("Каждая свежая новость по бумаге проверяет причину держать "
+                 "автоматически.")
     return "\n".join(lines)
 
 
 def format_insights(items: list[InsightRecord]) -> str:
     if not items:
         return ("💡 Уроков пока нет — они появляются из еженедельной рефлексии "
-                "(вс 23:00), когда есть закрытые тезисы или оценённые разборы.")
+                "(вс 23:00), когда есть закрытые сделки или оценённые разборы.")
     lines = ["💡 <b>Уроки бота:</b>", ""]
     for i in items[:15]:
         lines.append(f"• {esc(i.summary)}")
@@ -131,7 +132,7 @@ async def cb_thesis_save(callback: CallbackQuery, deps: Deps) -> None:
         run = await get_council_run(session, run_id)
     if not run or "meta" not in run[0]:
         await callback.answer()
-        await callback.message.answer("Не нашёл данные комитета для тезиса.")
+        await callback.message.answer("Не нашёл данные комитета для этой бумаги.")
         return
     transcript, asked_by = run
     if uid != asked_by:  # тезис из ЧУЖОГО прогона не принять — там чужая позиция
@@ -143,7 +144,7 @@ async def cb_thesis_save(callback: CallbackQuery, deps: Deps) -> None:
         # guard от двойного тапа/старой кнопки: тот же тезис не пересохраняем
         existing = await get_active_thesis(session, meta["ticker"], owner_id=uid)
         if existing and existing.thesis == proposal["thesis"]:
-            await callback.message.answer("📌 Этот тезис уже принят. /thesis — все.")
+            await callback.message.answer("📌 Уже на сопровождении. /thesis — все.")
             return
         entry = Decimal(meta["price_at_call"]) if meta.get("price_at_call") else None
         await save_thesis(session, ticker=meta["ticker"], figi=meta["figi"],
@@ -154,9 +155,10 @@ async def cb_thesis_save(callback: CallbackQuery, deps: Deps) -> None:
                           owner_id=uid)
         await session.commit()
     await callback.message.answer(
-        f"📌 Тезис по <b>{meta['ticker']}</b> принят:\n🎯 {esc(proposal['thesis'])}\n"
+        f"📌 Взял <b>{meta['ticker']}</b> на сопровождение:\n"
+        f"🎯 {esc(proposal['thesis'])}\n"
         f"🛑 Продаём если: {esc(proposal['invalidation'])}\n"
-        f"Буду проверять его каждой новостью. /thesis — все.")
+        f"Буду проверять каждой новостью. /thesis — все.")
 
 
 @router.callback_query(F.data.startswith("thesis_del:"))
@@ -172,4 +174,4 @@ async def cb_thesis_del(callback: CallbackQuery, deps: Deps) -> None:
                            realized_return_pct=None, close_reason="удалён владельцем",
                            owner_id=callback.from_user.id)
         await session.commit()
-    await callback.message.answer("🗑 Тезис закрыт.")
+    await callback.message.answer("🗑 Убрал, больше не сопровождаю.")
