@@ -26,6 +26,10 @@ class Proposal(BaseModel):
     thesis: str = Field(description="однострочный тезис ставки")
     invalidation: str = Field(description="конкретный триггер, при котором тезис ломается")
     confidence: float = Field(ge=0, le=1)
+    target_price: float | None = Field(
+        default=None, description="целевая цена фиксации прибыли, ₽ (для buy)")
+    exit_price: float | None = Field(
+        default=None, description="цена выхода/стопа, ₽ — ниже входа (для buy)")
 
 
 class RiskReview(BaseModel):
