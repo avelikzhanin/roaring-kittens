@@ -22,6 +22,7 @@ class Instrument:
     figi: str
     name: str
     aliases: frozenset[str] = field(default_factory=frozenset)
+    lot: int = 1  # размер лота с Мосбиржи (SBER=10 и т.п.)
 
 
 class Universe:
@@ -33,14 +34,14 @@ class Universe:
 
     async def load(self) -> None:
         tickers = await self._fetch_index_tickers()
-        shares = await self._broker.list_shares()  # ticker -> (figi, name)
+        shares = await self._broker.list_shares()  # ticker -> (figi, name, lot)
         for t in tickers:
             if t not in shares:
                 log.warning("universe_ticker_not_in_tinkoff", ticker=t)
                 continue
-            figi, name = shares[t]
+            figi, name, lot = shares[t]
             aliases = {name.lower(), t.lower()} | set(EXTRA_ALIASES.get(t, []))
-            self._by_ticker[t] = Instrument(t, figi, name, frozenset(aliases))
+            self._by_ticker[t] = Instrument(t, figi, name, frozenset(aliases), lot)
             for a in aliases:
                 self._alias_index[a] = t
         log.info("universe_loaded", count=len(self._by_ticker))

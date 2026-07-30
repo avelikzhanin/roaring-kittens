@@ -25,14 +25,16 @@ async def test_universe_load_maps_figi_and_builds_aliases():
 
     class FakeBroker:
         async def list_shares(self):
-            return {"SBER": ("BBG004730N88", "Сбер Банк"), "GAZP": ("BBG004730RP0", "Газпром"),
-                    "AAAA": ("BBGX", "Не из индекса")}
+            return {"SBER": ("BBG004730N88", "Сбер Банк", 10),
+                    "GAZP": ("BBG004730RP0", "Газпром", 10),
+                    "AAAA": ("BBGX", "Не из индекса", 1)}
 
     uni = Universe(broker=FakeBroker(), transport=transport)
     await uni.load()
     assert set(uni.tickers()) == {"SBER", "GAZP"}
     sber = uni.get("SBER")
     assert isinstance(sber, Instrument) and sber.figi == "BBG004730N88"
+    assert sber.lot == 10                       # лот с биржи — для сайзинга
     assert "сбербанк" in sber.aliases          # из EXTRA_ALIASES
     assert "сбер банк" in sber.aliases          # из имени инструмента
     assert uni.resolve("сбер банк") == sber     # резолв по алиасу

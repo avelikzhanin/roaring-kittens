@@ -98,9 +98,9 @@ class TinkoffBroker:
             resp = await client.market_data.get_last_prices(figi=figis)
             return map_last_prices(resp)
 
-    async def list_shares(self) -> dict[str, tuple[str, str]]:
-        """ticker -> (figi, name) для маппинга universe."""
+    async def list_shares(self) -> dict[str, tuple[str, str, int]]:
+        """ticker -> (figi, name, lot) для маппинга universe и сайзинга сделок."""
         async with AsyncClient(self._token) as client:
             resp = await client.instruments.shares()
-            return {s.ticker: (s.figi, s.name) for s in resp.instruments
+            return {s.ticker: (s.figi, s.name, s.lot) for s in resp.instruments
                     if s.class_code == "TQBR"}
