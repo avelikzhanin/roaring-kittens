@@ -151,7 +151,8 @@ import pytest
 
 from roaring_kittens.db.deals import (
     accept_deal, activate_deal, close_deal, create_proposal, decline_deal,
-    expire_if_stale, get_deal, has_recent_proposal, list_deals, mute_deal,
+    expire_if_stale, get_deal, has_live_deal, has_recent_proposal, list_deals,
+    mute_deal,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -173,7 +174,9 @@ async def test_deal_lifecycle(db_session_factory):
         assert await has_recent_proposal(session, 42, "SBER", days=7) is True
         assert await has_recent_proposal(session, 42, "GAZP", days=7) is False
         assert await has_recent_proposal(session, 777, "SBER", days=7) is False
-        await accept_deal(session, d.id)
+        assert await accept_deal(session, d.id) is True
+        assert await accept_deal(session, d.id) is False   # двойной тап
+        assert await has_live_deal(session, 42, "SBER") is True
         await activate_deal(session, d.id, entry_actual=Decimal("262.3"),
                             qty_actual=Decimal("10"))
         await session.commit()
@@ -195,7 +198,10 @@ async def test_decline_mute_and_expire(db_session_factory):
     async with db_session_factory() as session:
         a = await _propose(session, ticker="GAZP")
         b = await _propose(session, ticker="LKOH")
-        await decline_deal(session, a.id)
+        assert await decline_deal(session, a.id) is True
+        assert await decline_deal(session, a.id) is False  # уже не proposed
+        # «Пропущу» глушит идеи по тикеру на 7 дней (решение 1)
+        assert await has_recent_proposal(session, 42, "GAZP", days=7) is True
         until = datetime.now(tz=timezone.utc) + timedelta(days=3)
         await mute_deal(session, b.id, until=until)
         await session.commit()
@@ -291,24 +297,59 @@ async def list_deals(session: AsyncSession, user_id: int, *,
 
 async def has_recent_proposal(session: AsyncSession, user_id: int, ticker: str,
                               *, days: int = 7) -> bool:
-    """Любая сделка по тикеру за окно (кроме declined/expired) глушит новую идею."""
+    """Любая сделка по тикеру за окно глушит новую идею — В ТОМ ЧИСЛЕ declined:
+    «Пропущу» = «не предлагай неделю» (решение 1). Исключение — только expired,
+    которое юзер вообще не видел/не трогал."""
     since = datetime.now(tz=timezone.utc) - timedelta(days=days)
     row = (await session.execute(
         select(deals.c.id).where(
             deals.c.user_id == user_id, deals.c.ticker == ticker,
-            deals.c.status.notin_(("declined", "expired")),
+            deals.c.status != "expired",
             deals.c.proposed_at >= since).limit(1))).first()
     return row is not None
 
 
-async def accept_deal(session: AsyncSession, deal_id: UUIDType) -> None:
-    await session.execute(update(deals).where(deals.c.id == deal_id)
-                          .values(status="accepted"))
+async def has_live_deal(session: AsyncSession, user_id: int, ticker: str) -> bool:
+    """Есть ли уже accepted/active сделка по тикеру — гейт двойного покрытия."""
+    row = (await session.execute(
+        select(deals.c.id).where(
+            deals.c.user_id == user_id, deals.c.ticker == ticker,
+            deals.c.status.in_(("accepted", "active"))).limit(1))).first()
+    return row is not None
 
 
-async def decline_deal(session: AsyncSession, deal_id: UUIDType) -> None:
-    await session.execute(update(deals).where(deals.c.id == deal_id)
-                          .values(status="declined"))
+async def accept_deal(session: AsyncSession, deal_id: UUIDType) -> bool:
+    """True — принята; False — уже не proposed (двойной тап/старая кнопка)."""
+    result = await session.execute(
+        update(deals).where(deals.c.id == deal_id,
+                            deals.c.status == "proposed")
+        .values(status="accepted"))
+    return bool(result.rowcount)
+
+
+async def decline_deal(session: AsyncSession, deal_id: UUIDType) -> bool:
+    """True — отклонена; False — уже не proposed (гард от тапа по active)."""
+    result = await session.execute(
+        update(deals).where(deals.c.id == deal_id,
+                            deals.c.status == "proposed")
+        .values(status="declined"))
+    return bool(result.rowcount)
+
+
+async def expire_deal(session: AsyncSession, deal_id: UUIDType) -> None:
+    """Снять живое предложение/принятие (дубль покрытия, TTL accepted)."""
+    await session.execute(
+        update(deals).where(deals.c.id == deal_id,
+                            deals.c.status.in_(("proposed", "accepted")))
+        .values(status="expired"))
+
+
+async def list_all_active_deals(session: AsyncSession) -> list[DealRecord]:
+    """Все active-сделки всех юзеров одним запросом (для watch_deal_levels)."""
+    rows = (await session.execute(
+        select(deals).where(deals.c.status == "active")
+        .order_by(deals.c.proposed_at))).fetchall()
+    return [_row(r) for r in rows]
 
 
 async def activate_deal(session: AsyncSession, deal_id: UUIDType, *,
@@ -630,7 +671,8 @@ def test_idea_text_has_levels_size_and_disclaimer():
     assert "290" in text and "245" in text
     assert "Продаём если" in text and "отменят дивиденды" in text
     assert "5 лотов (50 шт" in text and "13100" in text
-    assert "не является индивидуальной инвестиционной рекомендацией" in text.lower()
+    assert "<i>Не является индивидуальной инвестиционной рекомендацией.</i>" in text
+    assert "_" not in text   # HTML parse mode: markdown-курсив запрещён
 
 
 def test_idea_text_flags_over_risk_and_no_size():
@@ -654,14 +696,18 @@ def test_idea_text_flags_over_risk_and_no_size():
 import structlog
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from roaring_kittens.db.deals import create_proposal, has_recent_proposal
+from roaring_kittens.alerts import send_alert
+from roaring_kittens.db.deals import (
+    create_proposal, expire_deal, has_live_deal, has_recent_proposal,
+)
 from roaring_kittens.sizing import SizedSuggestion, suggest_qty
 from roaring_kittens.telegram.formatting import esc
 from roaring_kittens.users_service import get_cached_portfolio
 
 log = structlog.get_logger()
 
-DISCLAIMER = "_Не является индивидуальной инвестиционной рекомендацией._"
+# parse_mode=HTML: markdown-подчёркивания НЕ работают (паттерн — render.py:27)
+DISCLAIMER = "<i>Не является индивидуальной инвестиционной рекомендацией.</i>"
 
 
 def build_idea_text(*, deal_no: int, ticker: str, entry: Decimal,
@@ -685,7 +731,7 @@ def build_idea_text(*, deal_no: int, ticker: str, entry: Decimal,
         else:
             lines.append(f"Логика: сработает выход — потеряешь ~{_q(sized.risk_rub)} ₽, "
                          f"это 1% портфеля, который я вижу.")
-    lines += ["", DISCLAIMER]
+    lines += ["", "Решить можно и позже: /deals → «Ждут решения».", "", DISCLAIMER]
     return "\n".join(lines)
 
 
@@ -717,6 +763,8 @@ async def propose_deal_from_council(deps, bot, user_id: int, instrument,
         async with deps.session_factory() as session:
             if await has_recent_proposal(session, user_id, instrument.ticker, days=7):
                 return
+            if await has_live_deal(session, user_id, instrument.ticker):
+                return  # бумага уже под сопровождением — дубль не плодим
         entry = outcome.state["ctx"].tech.last_close if outcome.state["ctx"].tech else None
         if entry is None:
             return
@@ -734,14 +782,22 @@ async def propose_deal_from_council(deps, bot, user_id: int, instrument,
                 target_price=target, exit_price=exit_price,
                 exit_note=proposal.invalidation)
             await session.commit()
-        await bot.send_message(
-            user_id,
-            build_idea_text(deal_no=deal.deal_no, ticker=instrument.ticker,
-                            entry=entry, target=target, exit_price=exit_price,
-                            exit_note=proposal.invalidation,
-                            rationale=proposal.thesis,
-                            confidence=proposal.confidence, sized=sized),
-            reply_markup=idea_keyboard(deal.id))
+        # send_alert: ночью идея буферизуется (кнопки утром живут в /deals —
+        # «Ждут решения»), quiet hours не нарушаем. Сбой отправки -> expire
+        # строки, чтобы 7-дневный guard не глушил идею, которую юзер НЕ видел.
+        text = build_idea_text(deal_no=deal.deal_no, ticker=instrument.ticker,
+                               entry=entry, target=target, exit_price=exit_price,
+                               exit_note=proposal.invalidation,
+                               rationale=proposal.thesis,
+                               confidence=proposal.confidence, sized=sized)
+        try:
+            await send_alert(deps, bot, user_id, text,
+                             keyboard=idea_keyboard(deal.id))
+        except Exception:
+            async with deps.session_factory() as session:
+                await expire_deal(session, deal.id)
+                await session.commit()
+            raise
         log.info("deal_proposed", user=user_id, ticker=instrument.ticker,
                  deal_no=deal.deal_no)
     except Exception as exc:
@@ -779,8 +835,8 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from roaring_kittens.db.deals import (
-    DealRecord, accept_deal, close_deal, decline_deal, expire_if_stale,
-    get_deal, list_deals, mute_deal,
+    DealRecord, accept_deal, close_deal, decline_deal, expire_deal,
+    expire_if_stale, get_deal, has_live_deal, list_deals, mute_deal,
 )
 from roaring_kittens.db.users import get_active_user
 from roaring_kittens.deps import Deps
@@ -795,12 +851,12 @@ def _pct(entry: Decimal, now_price: Decimal) -> Decimal:
     return ((now_price - entry) / entry * 100).quantize(Decimal("0.1"), ROUND_HALF_UP)
 
 
-def format_deals(open_deals: list[DealRecord], closed: list[DealRecord],
-                 prices: dict[str, Decimal]) -> str:
+def format_deals(active: list[DealRecord], accepted: list[DealRecord],
+                 closed: list[DealRecord], prices: dict[str, Decimal]) -> str:
     lines = ["💼 <b>Сделки</b>", ""]
-    if open_deals:
+    if active:
         lines.append("📈 <b>Открытые:</b>")
-        for d in open_deals:
+        for d in active:
             entry = d.entry_actual or d.entry_suggested
             now_price = prices.get(d.figi)
             pnl = f" · {'+' if _pct(entry, now_price) >= 0 else ''}{_pct(entry, now_price)}%" \
@@ -809,18 +865,25 @@ def format_deals(open_deals: list[DealRecord], closed: list[DealRecord],
                          f"{f' → сейчас {now_price} ₽' if now_price else ''}{pnl}"
                          f" · цель {d.target_price} / выход {d.exit_price}")
         lines.append("")
+    if accepted:  # принята, но покупки на счёте ещё не видно — без PnL
+        lines.append("⏳ <b>Ждут покупки:</b>")
+        for d in accepted:
+            lines.append(f"№{d.deal_no} {d.ticker} · план входа ~{d.entry_suggested} ₽ "
+                         f"· цель {d.target_price} / выход {d.exit_price}")
+        lines.append("")
     if closed:
         lines.append("📕 <b>Закрытые:</b>")
-        total = Decimal("0")
+        # итог — по ВСЕМ закрытым; показываем только последние 10
+        total = sum((d.result_pct or Decimal("0")) for d in closed)
         for d in closed[-10:]:
             res = d.result_pct if d.result_pct is not None else Decimal("0")
-            total += res
             days = (d.closed_at - (d.opened_at or d.proposed_at)).days
             mark = "✅" if res >= 0 else "❌"
             lines.append(f"№{d.deal_no} {d.ticker} · "
                          f"{'+' if res >= 0 else ''}{res}% за {days} дн {mark}")
-        lines += ["", f"Итог по закрытым: {'+' if total >= 0 else ''}{total}%"]
-    if not open_deals and not closed:
+        lines += ["", f"Итог по всем закрытым ({len(closed)}): "
+                      f"{'+' if total >= 0 else ''}{total}%"]
+    if not active and not accepted and not closed:
         lines.append("Пока пусто. Идеи приходят сами, когда комитет находит "
                      "сделку; свои покупки я тоже подхвачу на утренней сверке.")
     return "\n".join(lines)
@@ -829,6 +892,9 @@ def format_deals(open_deals: list[DealRecord], closed: list[DealRecord],
 @router.message(Command("deals"))
 @router.message(F.text == "💼 Сделки")
 async def cmd_deals(message: Message, deps: Deps) -> None:
+    if message.chat.type != "private":
+        await message.answer("Сделки — только в личке со мной.")
+        return
     async with deps.session_factory() as session:
         user = await get_active_user(session, message.from_user.id)
     if user is None:
@@ -836,17 +902,34 @@ async def cmd_deals(message: Message, deps: Deps) -> None:
                              "(нужен инвайт-код от владельца).")
         return
     async with deps.session_factory() as session:
-        open_deals = await list_deals(session, user.telegram_id,
-                                      statuses=("active", "accepted"))
+        proposed = await list_deals(session, user.telegram_id,
+                                    statuses=("proposed",))
+        # lazy-expire протухших предложений прямо при рендере
+        for d in proposed:
+            await expire_if_stale(session, d.id, ttl_hours=48)
+        await session.commit()
+        proposed = await list_deals(session, user.telegram_id,
+                                    statuses=("proposed",))
+        active = await list_deals(session, user.telegram_id, statuses=("active",))
+        accepted = await list_deals(session, user.telegram_id,
+                                    statuses=("accepted",))
         closed = await list_deals(session, user.telegram_id, statuses=("closed",))
     prices: dict[str, Decimal] = {}
-    if open_deals:
+    if active:
         try:
-            prices = await deps.broker.get_last_prices(
-                [d.figi for d in open_deals])
+            prices = await deps.broker.get_last_prices([d.figi for d in active])
         except Exception as exc:
             log.warning("deals_prices_failed", error=str(exc))
-    await message.answer(format_deals(open_deals, closed, prices))
+    await message.answer(format_deals(active, accepted, closed, prices))
+    # идеи без ответа — отдельными карточками с живыми кнопками (после ночного
+    # буфера, где клавиатура теряется, это единственный путь принять идею)
+    from roaring_kittens.deals_service import idea_keyboard
+    for d in proposed:
+        await message.answer(
+            f"💡 <b>Ждёт решения: идея №{d.deal_no} — купить {d.ticker} "
+            f"по ~{d.entry_suggested} ₽</b>\n"
+            f"🎯 Цель: {d.target_price} ₽ · 🛑 Продаём если: ниже {d.exit_price} ₽",
+            reply_markup=idea_keyboard(d.id))
 
 
 async def _owned_deal(callback: CallbackQuery, deps: Deps) -> DealRecord | None:
@@ -863,6 +946,14 @@ async def _owned_deal(callback: CallbackQuery, deps: Deps) -> DealRecord | None:
     return deal
 
 
+async def _drop_keyboard(callback: CallbackQuery) -> None:
+    """Кнопки с обработанной идеи снимаем — старые сообщения не должны стрелять."""
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass  # сообщение могло быть из буфера/старое — не критично
+
+
 @router.callback_query(F.data.startswith("deal_take:"))
 async def cb_take(callback: CallbackQuery, deps: Deps) -> None:
     deal = await _owned_deal(callback, deps)
@@ -871,14 +962,25 @@ async def cb_take(callback: CallbackQuery, deps: Deps) -> None:
     async with deps.session_factory() as session:
         if await expire_if_stale(session, deal.id, ttl_hours=48):
             await session.commit()
+            await _drop_keyboard(callback)
             await callback.answer("Идея устарела (48ч) — жди следующую",
                                   show_alert=True)
             return
-        if deal.status != "proposed":
-            await callback.answer("Уже обработана")
+        # дубль покрытия: по тикеру уже есть живая сделка (напр., converted
+        # после самостоятельной покупки) — идею гасим, вторую не открываем
+        if await has_live_deal(session, deal.user_id, deal.ticker):
+            await expire_deal(session, deal.id)
+            await session.commit()
+            await _drop_keyboard(callback)
+            await callback.answer("Эта бумага уже под сопровождением — /deals",
+                                  show_alert=True)
             return
-        await accept_deal(session, deal.id)
+        taken = await accept_deal(session, deal.id)  # WHERE status='proposed'
         await session.commit()
+    if not taken:
+        await callback.answer("Уже обработана")
+        return
+    await _drop_keyboard(callback)
     await callback.answer("Записал!")
     await callback.message.answer(
         f"📝 Сделка №{deal.deal_no} {deal.ticker} принята.\n"
@@ -893,9 +995,13 @@ async def cb_skip(callback: CallbackQuery, deps: Deps) -> None:
     if deal is None:
         return
     async with deps.session_factory() as session:
-        await decline_deal(session, deal.id)
+        declined = await decline_deal(session, deal.id)  # WHERE status='proposed'
         await session.commit()
-    await callback.answer("Ок, пропускаем")
+    if not declined:  # тап по старой кнопке уже активной сделки — НЕ убиваем её
+        await callback.answer("Уже обработана")
+        return
+    await _drop_keyboard(callback)
+    await callback.answer("Ок, пропускаем — неделю по этой бумаге не предлагаю")
 
 
 @router.callback_query(F.data.startswith("deal_sold:"))
@@ -1009,80 +1115,120 @@ git commit -m "feat: deal ideas from all three council paths"
 
 ```python
 # добавить в src/roaring_kittens/deals_service.py
+from datetime import datetime, timedelta, timezone
+
 from roaring_kittens.db.deals import (
-    activate_deal, close_deal, create_proposal, list_deals,
+    activate_deal, close_deal, expire_deal, list_deals,
 )
+
+ACCEPTED_TTL_DAYS = 7  # принял, но неделю не покупал -> идея снимается
 
 
 async def sync_deals_for_user(deps, bot, user_id: int, snap) -> None:
     """Утренняя сверка сделок со счётом: активировать accepted, закрыть
-    исчезнувшие active, конвертировать «ничейные» позиции. Ошибки — в лог."""
+    исчезнувшие active, конвертировать «ничейные» позиции.
+
+    Инварианты (ревью плана): не больше ОДНОЙ активации на тикер (лишние
+    accepted протухают); конвертация молчит, пока по тикеру есть ЛЮБАЯ живая
+    сделка (proposed тоже — иначе покупка до тапа даёт двойное покрытие);
+    per-item try — сбой одной сделки (403/timeout) не срывает остальные."""
     held = {p.ticker: p for p in snap.positions}
     async with deps.session_factory() as session:
+        proposed = await list_deals(session, user_id, statuses=("proposed",))
         accepted = await list_deals(session, user_id, statuses=("accepted",))
         active = await list_deals(session, user_id, statuses=("active",))
-    covered = {d.ticker for d in accepted} | {d.ticker for d in active}
+    covered = ({d.ticker for d in proposed} | {d.ticker for d in accepted}
+               | {d.ticker for d in active})
+    active_tickers = {d.ticker for d in active}
+    now = datetime.now(tz=timezone.utc)
 
-    for d in accepted:  # покупка появилась на счёте -> active
-        pos = held.get(d.ticker)
-        if pos is None:
-            continue
-        async with deps.session_factory() as session:
-            await activate_deal(session, d.id, entry_actual=pos.avg_price,
-                                qty_actual=pos.quantity)
-            await session.commit()
-        await bot.send_message(
-            user_id,
-            f"✅ Вижу покупку: {d.ticker} {pos.quantity} шт по {pos.avg_price} ₽.\n"
-            f"Сделка №{d.deal_no} открыта — слежу за целью {d.target_price} ₽ "
-            f"и выходом {d.exit_price} ₽.")
+    # accepted: свежие первыми — активируем самую свежую на тикер, прочие гасим
+    activated_tickers: set[str] = set()
+    for d in sorted(accepted, key=lambda x: x.proposed_at, reverse=True):
+        try:
+            if d.ticker in activated_tickers or d.ticker in active_tickers:
+                async with deps.session_factory() as session:
+                    await expire_deal(session, d.id)   # дубль на тикер
+                    await session.commit()
+                continue
+            pos = held.get(d.ticker)
+            if pos is None:
+                if now - d.proposed_at > timedelta(days=ACCEPTED_TTL_DAYS):
+                    async with deps.session_factory() as session:
+                        await expire_deal(session, d.id)
+                        await session.commit()
+                    await bot.send_message(
+                        user_id, f"🗑 Идея №{d.deal_no} {d.ticker} снята — "
+                                 f"покупки за {ACCEPTED_TTL_DAYS} дней не увидел.")
+                continue
+            async with deps.session_factory() as session:
+                await activate_deal(session, d.id, entry_actual=pos.avg_price,
+                                    qty_actual=pos.quantity)
+                await session.commit()
+            activated_tickers.add(d.ticker)
+            await bot.send_message(
+                user_id,
+                f"✅ Вижу покупку: {d.ticker} {pos.quantity} шт по "
+                f"{pos.avg_price} ₽.\nСделка №{d.deal_no} открыта — слежу за "
+                f"целью {d.target_price} ₽ и выходом {d.exit_price} ₽.")
+        except Exception as exc:
+            log.error("deal_activate_failed", user=user_id, deal=str(d.id),
+                      error=str(exc))
 
     for d in active:  # позиция исчезла -> закрываем по last price
-        if d.ticker in held:
-            continue
-        price = None
         try:
-            prices = await deps.broker.get_last_prices([d.figi])
-            price = prices.get(d.figi)
+            if d.ticker in held:
+                continue
+            price = None
+            try:
+                prices = await deps.broker.get_last_prices([d.figi])
+                price = prices.get(d.figi)
+            except Exception as exc:
+                log.warning("deal_autoclose_price_failed", error=str(exc))
+            entry = d.entry_actual or d.entry_suggested
+            result = None
+            if price and entry:
+                result = ((price - entry) / entry * 100).quantize(Decimal("0.1"))
+            async with deps.session_factory() as session:
+                await close_deal(session, d.id, exit_actual=price,
+                                 close_reason="позиция закрыта на счёте",
+                                 result_pct=result)
+                await session.commit()
+            res_txt = f" Результат: {'+' if result >= 0 else ''}{result}%." \
+                if result is not None else ""
+            await bot.send_message(
+                user_id, f"📕 Вижу продажу {d.ticker} — сделка №{d.deal_no} "
+                         f"закрыта.{res_txt} /deals — все.")
         except Exception as exc:
-            log.warning("deal_autoclose_price_failed", error=str(exc))
-        entry = d.entry_actual or d.entry_suggested
-        result = None
-        if price and entry:
-            result = ((price - entry) / entry * 100).quantize(Decimal("0.1"))
-        async with deps.session_factory() as session:
-            await close_deal(session, d.id, exit_actual=price,
-                             close_reason="позиция закрыта на счёте",
-                             result_pct=result)
-            await session.commit()
-        res_txt = f" Результат: {'+' if result >= 0 else ''}{result}%." \
-            if result is not None else ""
-        await bot.send_message(
-            user_id, f"📕 Вижу продажу {d.ticker} — сделка №{d.deal_no} "
-                     f"закрыта.{res_txt} /deals — все.")
+            log.error("deal_autoclose_failed", user=user_id, deal=str(d.id),
+                      error=str(exc))
 
     for ticker, pos in held.items():  # «ничейная» позиция -> converted-сделка
-        if ticker in covered:
-            continue
-        target, exit_price = sanitize_levels(entry=pos.current_price,
-                                             target=None, exit_price=None)
-        async with deps.session_factory() as session:
-            deal = await create_proposal(
-                session, user_id=user_id, ticker=ticker, figi=pos.figi,
-                source="converted", council_run_id=None,
-                entry_suggested=pos.avg_price, qty_suggested=pos.quantity,
-                target_price=target, exit_price=exit_price,
-                exit_note="существенное ухудшение новостного фона",
-                status="proposed")
-            await activate_deal(session, deal.id, entry_actual=pos.avg_price,
-                                qty_actual=pos.quantity)
-            await session.commit()
-        await bot.send_message(
-            user_id,
-            f"💼 Взял позицию {ticker} под сопровождение как сделку "
-            f"№{deal.deal_no} (вход {pos.avg_price} ₽ со счёта).\n"
-            f"🎯 Цель: {target} ₽ · 🛑 Продаём если: ниже {exit_price} ₽.\n"
-            f"/deals — все сделки.")
+        try:
+            if ticker in covered or ticker in activated_tickers:
+                continue
+            target, exit_price = sanitize_levels(entry=pos.current_price,
+                                                 target=None, exit_price=None)
+            async with deps.session_factory() as session:
+                deal = await create_proposal(
+                    session, user_id=user_id, ticker=ticker, figi=pos.figi,
+                    source="converted", council_run_id=None,
+                    entry_suggested=pos.avg_price, qty_suggested=pos.quantity,
+                    target_price=target, exit_price=exit_price,
+                    exit_note="существенное ухудшение новостного фона",
+                    status="proposed")
+                await activate_deal(session, deal.id, entry_actual=pos.avg_price,
+                                    qty_actual=pos.quantity)
+                await session.commit()
+            await bot.send_message(
+                user_id,
+                f"💼 Взял позицию {ticker} под сопровождение как сделку "
+                f"№{deal.deal_no} (вход {pos.avg_price} ₽ со счёта).\n"
+                f"🎯 Цель: {target} ₽ · 🛑 Продаём если: ниже {exit_price} ₽.\n"
+                f"/deals — все сделки.")
+        except Exception as exc:
+            log.error("deal_convert_failed", user=user_id, ticker=ticker,
+                      error=str(exc))
 ```
 
 - [ ] **Step 2: positions_sync._sync_user — вызвать сверку сделок ПЕРЕД тезисной логикой**
@@ -1150,17 +1296,24 @@ _deal_deduper = DealSignalDeduper()
 
 
 async def watch_deal_levels(deps, bot, today: date) -> None:
-    """Проверка целей/выходов active-сделок по last prices. Без LLM."""
+    """Проверка целей/выходов active-сделок по last prices. Без LLM.
+
+    Один запрос по всем юзерам (list_all_active_deals) + один батч цен —
+    без N+1. Отдельный батч get_last_prices осознанно: сигналы сделок не
+    должны зависеть от сбоев/пустоты interests основного цикла."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-    from roaring_kittens.db.deals import list_deals
+    from roaring_kittens.db.deals import list_all_active_deals
+    from roaring_kittens.db.users import get_active_user
     async with deps.session_factory() as session:
-        users = await list_active_users(session)
-    all_deals = []
-    for u in users:
-        async with deps.session_factory() as session:
-            all_deals += await list_deals(session, u.telegram_id,
-                                          statuses=("active",))
+        all_deals = await list_all_active_deals(session)
+    if not all_deals:
+        return
+    # revoked после revoke: сделки остаются в БД, но сигналы им не шлём
+    async with deps.session_factory() as session:
+        alive = {d.user_id for d in all_deals
+                 if await get_active_user(session, d.user_id) is not None}
+    all_deals = [d for d in all_deals if d.user_id in alive]
     if not all_deals:
         return
     try:
@@ -1206,16 +1359,25 @@ async def watch_deal_levels(deps, bot, today: date) -> None:
             log.error("deal_signal_failed", deal=str(d.id), error=str(exc))
 ```
 
-В `price_watch_job` — вызов в конце (после цикла по интересам):
+В `price_watch_job` — вызов В НАЧАЛЕ функции, ДО сбора interests (ревью: у
+price_watch_job есть ранние return — `if not interests` и сбой общего
+get_last_prices, — за которыми сигналы сделок молча отключались бы):
 
 ```python
-    try:
+async def price_watch_job(deps, bot) -> None:
+    today = datetime.now(tz=timezone.utc).date()
+    _purge_stale_cache(today)
+    try:  # сигналы сделок — ядро Фазы 5: независимы от interests-цикла ниже
         await watch_deal_levels(deps, bot, today)
     except Exception as exc:
         log.error("watch_deal_levels_failed", error=str(exc))
+    interests = await _collect_interests(deps)
+    ...
 ```
 
-и в `_purge_stale_cache` добавить `_deal_deduper.purge(today)`.
+(существующие строки `today = ...` и `_purge_stale_cache(today)` из середины
+функции убрать — они переехали в начало), и в `_purge_stale_cache` добавить
+`_deal_deduper.purge(today)`.
 
 - [ ] **Step 3: Commit**
 
@@ -1312,6 +1474,16 @@ CROWD_SOURCES: frozenset[str] = frozenset({"smartlab"})
         all_news = [n for n in all_news if n.source not in CROWD_SOURCES]
 ```
 
+- [ ] **Step 4b: ask.py — тот же фильтр (ревью: /ask скармливал Смартлаб
+одиночному аналитику как факты и показывал его в источниках)**
+
+В `_analyze_and_edit` после `news = await get_news_for_tickers(...)`:
+
+```python
+            from roaring_kittens.news.sources import CROWD_SOURCES
+            news = [n for n in news if n.source not in CROWD_SOURCES]
+```
+
 - [ ] **Step 5: Терминология «Продаём если» — три места:**
 
 - `thesis.py::format_theses`: `f"🚨 Инвалидация: {esc(t.invalidation)}"` →
@@ -1370,6 +1542,35 @@ git commit -m "feat: interfax news source, smartlab crowd-only, retail-friendly 
 ```bash
 git tag phase-5 && git push origin phase-5
 ```
+
+---
+
+## Адверсарное ревью плана (2026-07-30, воркфлоу 3 ревьюера)
+
+21 находка → верифицированы вручную → **13 уникальных подтверждено (0 отклонено), все внесены выше**:
+
+**Блокер:** двойное покрытие тикера — покупка до тапа [Беру] давала converted-сделку
++ активацию той же идеи (две active на тикер, двойные сигналы). → covered включает
+proposed; cb_take гасит идею при живой сделке по тикеру; активация ≤1 accepted на
+тикер, лишние → expired.
+
+**Major:** идея слалась голым bot.send_message в обход quiet hours (ночные
+авто-комитеты будили юзера), а строка сделки создавалась до отправки и глушила
+повтор на 7 дней при сбое → send_alert + expire при исключении + секция «Ждут
+решения» в /deals (кнопки после ночного буфера); sync_deals_for_user без per-deal
+try (self-review плана врал) → try на каждую итерацию всех трёх циклов; watch_deal_levels
+был недостижим за ранними return price_watch_job → вызов в начале джобы; accepted
+не протухал никогда (вторая идея через 7 дней активировала обе) → TTL 7 дней +
+единственность активации; cb_skip без гарда статуса убивал active-сделку тапом по
+старой кнопке → WHERE status='proposed' + снятие клавиатуры; дисклеймер в
+markdown-курсиве при parse_mode=HTML → <i>…</i>; has_recent_proposal исключал
+declined вопреки решению 1 → «Пропущу» глушит 7 дней.
+
+**Minor:** «Итог по закрытым» суммировал только последние 10 → итог по всем;
+/ask скармливал Смартлаб как факты → CROWD-фильтр и там; N+1 в watch_deal_levels →
+list_all_active_deals одним запросом (+фильтр revoked); accepted в /deals
+рендерился с PnL несуществующей позиции → секция «⏳ Ждут покупки»; /deals без
+private-гейта → как у /digest.
 
 ---
 
