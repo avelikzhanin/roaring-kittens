@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import structlog
 from pydantic import BaseModel, Field
@@ -90,6 +91,8 @@ async def run_morning_digest(deps: Deps, bot, chat_id: int, broker=None,
     if tickers:
         async with deps.session_factory() as session:
             all_news = await get_news_for_tickers(session, tickers, since=since)
+        from roaring_kittens.news.sources import CROWD_SOURCES
+        all_news = [n for n in all_news if n.source not in CROWD_SOURCES]
         for n in all_news:
             for t in n.tickers:
                 if t in tickers:
@@ -113,6 +116,24 @@ async def run_morning_digest(deps: Deps, bot, chat_id: int, broker=None,
             log.error("digest_llm_failed", error=str(exc))
 
     text = build_digest_text(snap, news_by_ticker, ai_summary)
+
+    from roaring_kittens.db.deals import list_deals
+    async with deps.session_factory() as session:
+        open_deals = await list_deals(session, chat_id, statuses=("active",))
+    if open_deals:
+        deal_lines = ["", "💼 <b>Твои сделки:</b>"]
+        for d in open_deals:
+            entry = d.entry_actual or d.entry_suggested
+            pos = next((p for p in snap.positions if p.ticker == d.ticker), None)
+            now_p = pos.current_price if pos else None
+            pnl = ""
+            if now_p and entry:
+                p = ((now_p - entry) / entry * 100).quantize(Decimal("0.1"))
+                pnl = f" · {'+' if p >= 0 else ''}{p}%"
+            deal_lines.append(f"№{d.deal_no} {d.ticker} · вход {entry}"
+                              f"{f' → {now_p}' if now_p else ''} ₽{pnl}"
+                              f" · цель {d.target_price} / выход {d.exit_price}")
+        text += "\n" + "\n".join(deal_lines)
 
     # Тихое утро: новостей нет, но дайджест не должен быть пустым — даём разбор дня по ротации.
     if not news_by_ticker and snap.positions and allow_spotlight:

@@ -103,6 +103,8 @@ async def _analyze_and_edit(progress: Message, deps: Deps, instrument: Instrumen
         async with deps.session_factory() as session:
             news = await get_news_for_tickers(session, [instrument.ticker], since=since)
             prev = await get_last_call(session, instrument.ticker)
+        from roaring_kittens.news.sources import CROWD_SOURCES
+        news = [n for n in news if n.source not in CROWD_SOURCES]
         broker = await get_user_broker(deps, asked_by) if registered else None
         position_note = await build_position_note(broker, instrument.ticker) \
             if broker is not None else None

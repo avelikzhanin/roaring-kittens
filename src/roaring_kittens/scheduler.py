@@ -74,14 +74,18 @@ async def poll_news(deps: Deps, bot=None) -> None:
         log.info("news_polled", source=source_id, fetched=len(items),
                  relevant=len(relevant), inserted=len(inserted_urls))
     log.info("news_poll_done", inserted=len(fresh_items))
-    if bot is not None and fresh_items:
+    # Crowd-посты (Смартлаб) — только сентименту комитета: в БД сохранены,
+    # но тезисы/алерты проверяем ФАКТАМИ (РБК, Интерфакс)
+    from roaring_kittens.news.sources import CROWD_SOURCES
+    fact_items = [i for i in fresh_items if i.source not in CROWD_SOURCES]
+    if bot is not None and fact_items:
         handled: dict[int, set[str]] = {}
         try:
-            handled = await validate_theses(deps, bot, fresh_items)
+            handled = await validate_theses(deps, bot, fact_items)
         except Exception as exc:
             log.error("validate_theses_failed", error=str(exc))
         try:
-            await impact_scan(deps, bot, fresh_items, skip_by_user=handled)
+            await impact_scan(deps, bot, fact_items, skip_by_user=handled)
         except Exception as exc:
             log.error("impact_scan_failed", error=str(exc))
 

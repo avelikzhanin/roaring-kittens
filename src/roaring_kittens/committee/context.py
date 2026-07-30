@@ -19,9 +19,10 @@ from roaring_kittens.universe.universe import Instrument
 
 log = structlog.get_logger()
 
+from roaring_kittens.news.sources import CROWD_SOURCES
+
 NEWS_WINDOW_DAYS = 7
 CANDLES_DAYS = 90
-CROWD_SOURCES = {"smartlab"}
 
 
 @dataclass

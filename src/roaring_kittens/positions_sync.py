@@ -148,7 +148,7 @@ async def _sync_user(deps, bot, owner_id: int, broker) -> None:
             owner_id,
             f"📌 Обнаружена позиция <b>{pos.ticker}</b> (вес ≥5%) без тезиса.\n"
             f"Сгенерировал тезис: {esc(draft.thesis)}\n"
-            f"🚨 Инвалидация: {esc(draft.invalidation)}\n"
+            f"🛑 Продаём если: {esc(draft.invalidation)}\n"
             f"Буду проверять его каждой новостью. Не согласен — удали.",
             reply_markup=kb)
     log.info("positions_synced", closed=len(actions.to_close),

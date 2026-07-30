@@ -34,7 +34,7 @@ def format_theses(theses: list[ThesisRecord]) -> str:
         idea = "" if t.backed_by_position else " · идея"
         lines.append(f"<b>{t.ticker}</b> (с {t.opened_at:%d.%m}, {t.source}{idea})")
         lines.append(f"🎯 {esc(t.thesis)}")
-        lines.append(f"🚨 Инвалидация: {esc(t.invalidation)}")
+        lines.append(f"🛑 Продаём если: {esc(t.invalidation)}")
         lines.append("")
     lines.append("Каждая свежая новость по тикеру проверяет тезис автоматически.")
     return "\n".join(lines)
@@ -155,7 +155,7 @@ async def cb_thesis_save(callback: CallbackQuery, deps: Deps) -> None:
         await session.commit()
     await callback.message.answer(
         f"📌 Тезис по <b>{meta['ticker']}</b> принят:\n🎯 {esc(proposal['thesis'])}\n"
-        f"🚨 {esc(proposal['invalidation'])}\n"
+        f"🛑 Продаём если: {esc(proposal['invalidation'])}\n"
         f"Буду проверять его каждой новостью. /thesis — все.")
 
 
