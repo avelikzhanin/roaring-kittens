@@ -121,6 +121,32 @@ CREATE TABLE IF NOT EXISTS invites (
 
 ALTER TABLE theses ADD COLUMN IF NOT EXISTS owner_id BIGINT;
 
+CREATE TABLE IF NOT EXISTS deals (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    deal_no      BIGSERIAL,                              -- человекочитаемый «№12»
+    user_id      BIGINT NOT NULL,
+    ticker       VARCHAR(20) NOT NULL,
+    figi         VARCHAR(20) NOT NULL,
+    status       VARCHAR(20) NOT NULL DEFAULT 'proposed',-- proposed|accepted|active|closed|declined|expired
+    source       VARCHAR(20) NOT NULL,                   -- 'council' | 'converted'
+    council_run_id UUID,
+    proposed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    entry_suggested NUMERIC,
+    qty_suggested   NUMERIC,
+    entry_actual    NUMERIC,
+    qty_actual      NUMERIC,
+    opened_at    TIMESTAMPTZ,
+    target_price NUMERIC NOT NULL,
+    exit_price   NUMERIC NOT NULL,
+    exit_note    TEXT NOT NULL,                          -- «Продаём если …» (новостная часть)
+    signal_muted_until TIMESTAMPTZ,
+    closed_at    TIMESTAMPTZ,
+    close_reason TEXT,
+    exit_actual  NUMERIC,
+    result_pct   NUMERIC
+);
+CREATE INDEX IF NOT EXISTS idx_deals_user_status ON deals (user_id, status);
+
 CREATE TABLE IF NOT EXISTS bot_state (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,

@@ -123,6 +123,32 @@ invites = Table(
     Column("redeemed_by", BigInteger),
 )
 
+deals = Table(
+    "deals", metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")),
+    Column("deal_no", BigInteger, server_default=text("nextval('deals_deal_no_seq')")),
+    Column("user_id", BigInteger, nullable=False),
+    Column("ticker", String(20), nullable=False),
+    Column("figi", String(20), nullable=False),
+    Column("status", String(20), nullable=False, server_default=text("'proposed'")),
+    Column("source", String(20), nullable=False),
+    Column("council_run_id", UUID(as_uuid=True)),
+    Column("proposed_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    Column("entry_suggested", Numeric),
+    Column("qty_suggested", Numeric),
+    Column("entry_actual", Numeric),
+    Column("qty_actual", Numeric),
+    Column("opened_at", TIMESTAMP(timezone=True)),
+    Column("target_price", Numeric, nullable=False),
+    Column("exit_price", Numeric, nullable=False),
+    Column("exit_note", Text, nullable=False),
+    Column("signal_muted_until", TIMESTAMP(timezone=True)),
+    Column("closed_at", TIMESTAMP(timezone=True)),
+    Column("close_reason", Text),
+    Column("exit_actual", Numeric),
+    Column("result_pct", Numeric),
+)
+
 bot_state = Table(
     "bot_state", metadata,
     Column("key", Text, primary_key=True),
