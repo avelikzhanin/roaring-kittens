@@ -69,6 +69,9 @@ async def cmd_council(message: Message, command: CommandObject, deps: Deps) -> N
                                outcome.state["debate"], outcome.proposal, outcome.risk),
         reply_markup=keyboard)
 
+    from roaring_kittens.deals_service import propose_deal_from_council
+    await propose_deal_from_council(deps, message.bot, uid, instrument, outcome)
+
 
 async def _may_see_run(deps: Deps, user_id: int, asked_by: int) -> bool:
     """Транскрипт содержит позицию инициатора: только он сам или admin."""

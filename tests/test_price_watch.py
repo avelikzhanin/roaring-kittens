@@ -1,7 +1,20 @@
 from datetime import date
 from decimal import Decimal
 
-from roaring_kittens.price_watch import DayMoveDeduper, significant_move
+from roaring_kittens.price_watch import (
+    DayMoveDeduper, DealSignalDeduper, significant_move,
+)
+
+
+def test_deal_signal_deduper_per_kind():
+    d = DealSignalDeduper()
+    today = date(2026, 7, 30)
+    assert d.seen("id1", "exit", today) is False
+    d.mark("id1", "exit", today)
+    assert d.seen("id1", "exit", today) is True
+    assert d.seen("id1", "target", today) is False   # другой тип — отдельно
+    d.purge(date(2026, 7, 31))
+    assert d.seen("id1", "exit", today) is False
 
 
 def test_significant_move_threshold():

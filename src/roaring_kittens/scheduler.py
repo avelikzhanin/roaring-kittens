@@ -209,6 +209,9 @@ async def _validate_one_thesis(deps, bot, thesis, news: list,
                                outcome.risk),
         critical=True, keyboard=keyboard)
 
+    from roaring_kittens.deals_service import propose_deal_from_council
+    await propose_deal_from_council(deps, bot, owner_id, instrument, outcome)
+
 
 async def _collect_impact_interests(deps,
                                     skip_by_user: dict[int, set[str]]
@@ -332,6 +335,9 @@ async def _react_for_user(deps, bot, uid: int, ticker: str, check,
                                             outcome.state["debate"], outcome.proposal,
                                             outcome.risk),
                      critical=True, keyboard=keyboard)
+
+    from roaring_kittens.deals_service import propose_deal_from_council
+    await propose_deal_from_council(deps, bot, uid, instrument, outcome)
 
 
 async def _flush_buffer(deps, bot, chat_id: int, header: str) -> int:

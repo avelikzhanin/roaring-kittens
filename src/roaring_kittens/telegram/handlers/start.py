@@ -14,8 +14,9 @@ router = Router()
 
 MAIN_MENU = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="📊 Портфель"), KeyboardButton(text="📅 Дайджест")],
-        [KeyboardButton(text="💡 Спросить"), KeyboardButton(text="❓ Помощь")],
+        [KeyboardButton(text="📊 Портфель"), KeyboardButton(text="💼 Сделки")],
+        [KeyboardButton(text="📅 Дайджест"), KeyboardButton(text="💡 Спросить")],
+        [KeyboardButton(text="❓ Помощь")],
     ],
     resize_keyboard=True,
 )
@@ -27,6 +28,7 @@ HELP_TEXT = (
     "• Свой вопрос — руками: <code>/ask SBER почему падает?</code>\n"
     "• <code>/track</code> — послужной список бота (hit-rate vs IMOEX, включая промахи)\n\n"
     "<b>Для подключённых (инвайт-код + свой Tinkoff-токен):</b>\n"
+    "• <code>/deals</code> — твои сделки: идеи, открытые с уровнями, закрытые с результатом\n"
     "• <code>/council ТИКЕР</code> — полный разбор комитетом (4 аналитика + дебаты Bull/Bear)\n"
     "• <code>/thesis</code> — активные тезисы · <code>/history ТИКЕР</code> — прошлые разборы\n"
     "• <code>/watch ТИКЕР</code> / <code>/unwatch</code> / <code>/watchlist</code> — "

@@ -86,6 +86,11 @@ async def _sync_user(deps, bot, owner_id: int, broker) -> None:
     if snap is None:
         log.error("sync_portfolio_failed", user=owner_id)
         return
+    from roaring_kittens.deals_service import sync_deals_for_user
+    try:  # сделки: активация accepted / закрытие проданных / конвертация
+        await sync_deals_for_user(deps, bot, owner_id, snap)
+    except Exception as exc:
+        log.error("deals_sync_failed", user=owner_id, error=str(exc))
     async with deps.session_factory() as session:
         active = await get_active_theses(session, owner_id=owner_id)
         suppressed = await get_recently_deleted_tickers(session, days=30,

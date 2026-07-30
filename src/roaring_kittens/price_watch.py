@@ -43,7 +43,24 @@ class DayMoveDeduper:
         self._seen = {k for k in self._seen if k[0] == today}
 
 
+class DealSignalDeduper:
+    """1 сигнал на (сделка, тип) в день; mark ПОСЛЕ успешной отправки."""
+
+    def __init__(self):
+        self._seen: set[tuple[date, str, str]] = set()
+
+    def seen(self, deal_id: str, kind: str, today: date) -> bool:
+        return (today, deal_id, kind) in self._seen
+
+    def mark(self, deal_id: str, kind: str, today: date) -> None:
+        self._seen.add((today, deal_id, kind))
+
+    def purge(self, today: date) -> None:
+        self._seen = {k for k in self._seen if k[0] == today}
+
+
 _deduper = DayMoveDeduper()
+_deal_deduper = DealSignalDeduper()
 _prev_close_cache: dict[tuple[date, str], Decimal] = {}
 
 
@@ -53,6 +70,7 @@ def _purge_stale_cache(today: date) -> None:
     for k in stale:
         del _prev_close_cache[k]
     _deduper.purge(today)
+    _deal_deduper.purge(today)
 
 
 async def _prev_close(deps, figi: str, today: date) -> Decimal | None:
@@ -98,7 +116,76 @@ async def _collect_interests(deps) -> dict[int, dict[str, str]]:
     return interests
 
 
+async def watch_deal_levels(deps, bot, today: date) -> None:
+    """Проверка целей/выходов active-сделок по last prices. Без LLM.
+
+    Один запрос по всем юзерам + один батч цен. Отдельный батч осознанно:
+    сигналы сделок не должны зависеть от сбоев/пустоты interests-цикла."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    from roaring_kittens.db.deals import list_all_active_deals
+    from roaring_kittens.db.users import get_active_user
+    async with deps.session_factory() as session:
+        all_deals = await list_all_active_deals(session)
+    if not all_deals:
+        return
+    # revoked после revoke: сделки остаются в БД, но сигналы им не шлём
+    async with deps.session_factory() as session:
+        alive = {d.user_id for d in all_deals
+                 if await get_active_user(session, d.user_id) is not None}
+    all_deals = [d for d in all_deals if d.user_id in alive]
+    if not all_deals:
+        return
+    try:
+        prices = await deps.broker.get_last_prices(
+            list({d.figi for d in all_deals}))
+    except Exception as exc:
+        log.error("deal_levels_prices_failed", error=str(exc))
+        return
+    now = datetime.now(tz=timezone.utc)
+    for d in all_deals:
+        price = prices.get(d.figi)
+        if price is None:
+            continue
+        if d.signal_muted_until and d.signal_muted_until > now:
+            continue
+        kind = None
+        if price <= d.exit_price:
+            kind = "exit"
+        elif price >= d.target_price:
+            kind = "target"
+        if kind is None or _deal_deduper.seen(str(d.id), kind, today):
+            continue
+        entry = d.entry_actual or d.entry_suggested
+        pnl = ""
+        if entry:
+            p = ((price - entry) / entry * 100).quantize(Decimal("0.1"))
+            pnl = f" Сейчас: {'+' if p >= 0 else ''}{p}%."
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Продал", callback_data=f"deal_sold:{d.id}"),
+            InlineKeyboardButton(text="Держу дальше",
+                                 callback_data=f"deal_hold:{d.id}"),
+        ]])
+        text = (f"🛑 Сделка №{d.deal_no} {d.ticker}: цена {price} ₽ — сработал "
+                f"сигнал выхода (ниже {d.exit_price} ₽). Рекомендую продать.{pnl}"
+                if kind == "exit" else
+                f"🎯 Сделка №{d.deal_no} {d.ticker}: цена {price} ₽ достигла цели "
+                f"{d.target_price} ₽. Можно фиксировать прибыль.{pnl}")
+        try:
+            await send_alert(deps, bot, d.user_id, text,
+                             critical=(kind == "exit"), keyboard=kb)
+            _deal_deduper.mark(str(d.id), kind, today)
+        except Exception as exc:
+            log.error("deal_signal_failed", deal=str(d.id), error=str(exc))
+
+
 async def price_watch_job(deps, bot) -> None:
+    today = datetime.now(tz=timezone.utc).date()
+    _purge_stale_cache(today)
+    try:  # сигналы сделок — ядро Фазы 5: независимы от interests-цикла ниже
+        await watch_deal_levels(deps, bot, today)
+    except Exception as exc:
+        log.error("watch_deal_levels_failed", error=str(exc))
     interests = await _collect_interests(deps)
     if not interests:
         return
@@ -108,8 +195,6 @@ async def price_watch_job(deps, bot) -> None:
     except Exception as exc:
         log.error("price_watch_last_prices_failed", error=str(exc))
         return
-    today = datetime.now(tz=timezone.utc).date()
-    _purge_stale_cache(today)
     for user_id, figi_by_ticker in interests.items():
         for ticker, figi in figi_by_ticker.items():
             last = prices.get(figi)

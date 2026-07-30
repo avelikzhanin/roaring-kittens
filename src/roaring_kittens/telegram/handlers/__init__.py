@@ -1,8 +1,8 @@
 from aiogram import Router
 
 from roaring_kittens.telegram.handlers import (
-    admin, ask, budget_cmd, council, digest, onboarding, portfolio, seed, start,
-    thesis, track, watchlist,
+    admin, ask, budget_cmd, council, deals, digest, onboarding, portfolio, seed,
+    start, thesis, track, watchlist,
 )
 
 all_routers = Router()
@@ -19,3 +19,4 @@ all_routers.include_router(thesis.router)
 all_routers.include_router(watchlist.router)
 all_routers.include_router(admin.router)
 all_routers.include_router(budget_cmd.router)
+all_routers.include_router(deals.router)
