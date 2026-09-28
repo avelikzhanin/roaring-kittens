@@ -53,9 +53,17 @@ async def run() -> None:
                 {"o": owner_id})
             await session.commit()
 
-    broker = TinkoffBroker(settings.tinkoff_token)
+    from roaring_kittens import health
+
+    broker = TinkoffBroker(settings.tinkoff_token, health_tracker=health.tinkoff)
     universe = Universe(broker=broker)
-    await universe.load()
+    try:
+        await universe.load()
+    except Exception as exc:
+        # Tinkoff лежит на старте — НЕ падаем в crash-loop без пульса: стартуем
+        # с пустой вселенной, universe_reload_job догрузит, health_job доложит
+        log.error("universe_load_failed", error=str(exc))
+        health.tinkoff.note_failure(str(exc))
 
     openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
     usage_logger = make_db_usage_logger(session_factory)

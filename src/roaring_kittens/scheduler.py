@@ -18,6 +18,7 @@ from roaring_kittens.db.users import list_active_users
 from roaring_kittens.db.watchlist import list_watchlist
 from roaring_kittens.deps import Deps
 from roaring_kittens.digest.morning import run_morning_digest
+from roaring_kittens.news.filters import is_noise
 from roaring_kittens.news.matching import match_tickers
 from roaring_kittens.news.repository import save_news
 from roaring_kittens.news.rss import fetch_feed
@@ -62,8 +63,11 @@ async def _budget_mode_for(deps, bot, uid: int) -> tuple[str, bool]:
 async def poll_news(deps: Deps, bot=None) -> None:
     alias_map = deps.universe.alias_map()
     fresh_items = []  # ТОЛЬКО реально вставленные новости — точность вместо окна
+    now = datetime.now(tz=timezone.utc)
     for source_id, url in SOURCES:
-        items = await fetch_feed(url, source=source_id)
+        raw = await fetch_feed(url, source=source_id)
+        # спорт под брендом банка и «старые по адресу» статьи — не новости компании
+        items = [i for i in raw if not is_noise(i, now)]
         for item in items:
             item.tickers = match_tickers(f"{item.headline} {item.body or ''}", alias_map)
         relevant = [i for i in items if i.tickers]
@@ -71,7 +75,8 @@ async def poll_news(deps: Deps, bot=None) -> None:
             inserted_urls = await save_news(session, relevant)
             await session.commit()
         fresh_items += [i for i in relevant if i.url in set(inserted_urls)]
-        log.info("news_polled", source=source_id, fetched=len(items),
+        log.info("news_polled", source=source_id, fetched=len(raw),
+                 dropped_noise=len(raw) - len(items),
                  relevant=len(relevant), inserted=len(inserted_urls))
     log.info("news_poll_done", inserted=len(fresh_items))
     # Crowd-посты (Смартлаб) — только сентименту комитета: в БД сохранены,
@@ -412,6 +417,46 @@ async def morning_digest_job(deps: Deps, bot) -> None:
                  sec=round(time.monotonic() - started, 1))
 
 
+async def health_job(deps: Deps, bot) -> None:
+    """Каждый час: Tinkoff лежит >1ч -> владельцу 🩺 (раз в эпизод и раз в день);
+    ожил после алерта -> ✅ один раз. Бесшумная деградация запрещена."""
+    from zoneinfo import ZoneInfo
+
+    from roaring_kittens import health
+    from roaring_kittens.db.owner import fetch_owner_id
+    owner_id = await fetch_owner_id(deps.session_factory)
+    if owner_id is None:
+        return
+    h = health.tinkoff
+    tz = ZoneInfo(deps.settings.tz)
+    today = datetime.now(tz=tz).strftime("%Y-%m-%d")
+    if h.is_down():
+        if not h.needs_alert(today):
+            return
+        since = h.down_since.astimezone(tz).strftime("%d.%m %H:%M")
+        text = (f"🩺 <b>Tinkoff API недоступен с {since} МСК.</b>\n"
+                f"Не работают: портфель и дайджест, сигналы по сделкам, сканер, "
+                f"скоринг. Новости и алерты по ним — работают.\n"
+                f"Ошибка: <code>{esc((h.last_error or '')[:160])}</code>")
+        await send_alert(deps, bot, owner_id, text)
+        h.mark_alerted(today)  # ТОЛЬКО после успешной отправки
+    elif h.recovery_pending and h.last_ok is not None:
+        await send_alert(deps, bot, owner_id,
+                         "✅ Tinkoff API снова отвечает — портфель, сигналы и сканер "
+                         "работают в штатном режиме.")
+        h.mark_recovered()
+
+
+async def universe_reload_job(deps: Deps) -> None:
+    """Старт без Tinkoff (crash-loop запрещён): вселенная пуста — пробуем догрузить."""
+    if deps.universe.tickers():
+        return
+    try:
+        await deps.universe.load()
+    except Exception as exc:
+        log.warning("universe_reload_failed", error=str(exc))
+
+
 def build_scheduler(deps: Deps, bot) -> AsyncIOScheduler:
     # misfire_grace_time: занятый процесс не должен молча пропускать cron-тики
     scheduler = AsyncIOScheduler(timezone=deps.settings.tz,
@@ -438,4 +483,8 @@ def build_scheduler(deps: Deps, bot) -> AsyncIOScheduler:
     scheduler.add_job(scanner_job, "cron", day_of_week="mon-fri",
                       hour=10, minute=40, args=[deps, bot],
                       id="scanner", max_instances=1, coalesce=True)
+    scheduler.add_job(health_job, "cron", minute=50, args=[deps, bot],
+                      id="health", max_instances=1, coalesce=True)
+    scheduler.add_job(universe_reload_job, "interval", minutes=10, args=[deps],
+                      id="universe_reload", max_instances=1, coalesce=True)
     return scheduler

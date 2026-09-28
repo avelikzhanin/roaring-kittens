@@ -11,7 +11,7 @@ from roaring_kittens.db.deals import (
     has_recent_proposal, list_deals,
 )
 from roaring_kittens.sizing import SizedSuggestion, suggest_qty
-from roaring_kittens.telegram.formatting import esc
+from roaring_kittens.telegram.formatting import esc, fmt_price, fmt_qty
 from roaring_kittens.users_service import get_cached_portfolio, get_user_broker
 
 log = structlog.get_logger()
@@ -53,20 +53,22 @@ def build_idea_text(*, deal_no: int, ticker: str, entry: Decimal,
     up = _q((target - entry) / entry * 100)
     dn = _q((entry - exit_price) / entry * 100)
     lines = [
-        f"💡 <b>Идея сделки №{deal_no} — купить {ticker} по ~{entry} ₽</b>", "",
+        f"💡 <b>Идея сделки №{deal_no} — купить {ticker} по ~{fmt_price(entry)} ₽</b>", "",
         f"Почему: {esc(rationale)}",
         f"Комитет аналитиков: BUY, уверенность {round(confidence * 100)}%.", "",
-        f"🎯 Цель: {target} ₽ (+{up}%)",
-        f"🛑 Продаём если: цена ниже {exit_price} ₽ (−{dn}%) или {esc(exit_note)}",
+        f"🎯 Цель: {fmt_price(target)} ₽ (+{up}%)",
+        f"🛑 Продаём если: цена ниже {fmt_price(exit_price)} ₽ (−{dn}%) "
+        f"или {esc(exit_note)}",
     ]
     if sized is not None:
-        lines += ["", f"📐 Размер: {sized.lots} лотов ({sized.qty} шт, ~{_q(sized.cost)} ₽)"]
+        lines += ["", f"📐 Размер: {sized.lots} лотов ({sized.qty} шт, "
+                      f"~{fmt_price(sized.cost)} ₽)"]
         if sized.over_risk:
-            lines.append(f"⚠️ Даже минимальный лот рискует {_q(sized.risk_rub)} ₽ — "
+            lines.append(f"⚠️ Даже минимальный лот рискует {fmt_price(sized.risk_rub)} ₽ — "
                          f"для твоего портфеля это выше нормы 1%.")
         else:
-            lines.append(f"Логика: сработает выход — потеряешь ~{_q(sized.risk_rub)} ₽, "
-                         f"это 1% портфеля, который я вижу.")
+            lines.append(f"Логика: сработает выход — потеряешь "
+                         f"~{fmt_price(sized.risk_rub)} ₽, это 1% портфеля, который я вижу.")
     lines += ["", "Решить можно и позже: /deals → «Ждут решения».", "", DISCLAIMER]
     return "\n".join(lines)
 
@@ -184,9 +186,10 @@ async def sync_deals_for_user(deps, bot, user_id: int, snap) -> None:
             activated_tickers.add(d.ticker)
             await bot.send_message(
                 user_id,
-                f"✅ Вижу покупку: {d.ticker} {pos.quantity} шт по "
-                f"{pos.avg_price} ₽.\nСделка №{d.deal_no} открыта — слежу за "
-                f"целью {d.target_price} ₽ и выходом {d.exit_price} ₽.")
+                f"✅ Вижу покупку: {d.ticker} {fmt_qty(pos.quantity)} шт по "
+                f"{fmt_price(pos.avg_price)} ₽.\nСделка №{d.deal_no} открыта — слежу за "
+                f"целью {fmt_price(d.target_price)} ₽ и выходом "
+                f"{fmt_price(d.exit_price)} ₽.")
         except Exception as exc:
             log.error("deal_activate_failed", user=user_id, deal=str(d.id),
                       error=str(exc))
@@ -239,9 +242,9 @@ async def sync_deals_for_user(deps, bot, user_id: int, snap) -> None:
             await bot.send_message(
                 user_id,
                 f"💼 Взял позицию {ticker} под сопровождение как сделку "
-                f"№{deal.deal_no} (вход {pos.avg_price} ₽ со счёта).\n"
-                f"🎯 Цель: {target} ₽ · 🛑 Продаём если: ниже {exit_price} ₽.\n"
-                f"/deals — все сделки.")
+                f"№{deal.deal_no} (вход {fmt_price(pos.avg_price)} ₽ со счёта).\n"
+                f"🎯 Цель: {fmt_price(target)} ₽ · 🛑 Продаём если: ниже "
+                f"{fmt_price(exit_price)} ₽.\n/deals — все сделки.")
         except Exception as exc:
             log.error("deal_convert_failed", user=user_id, ticker=ticker,
                       error=str(exc))

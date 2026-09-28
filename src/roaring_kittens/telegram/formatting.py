@@ -32,6 +32,14 @@ def _fmt_price(v: Decimal) -> str:
     return f"{v.quantize(Decimal('0.01'), ROUND_HALF_UP).normalize():f}"
 
 
+def fmt_price(v: Decimal | None) -> str:
+    """Публичная версия для сделок/сигналов; None (нет цены в БД) -> «—»."""
+    return "—" if v is None else _fmt_price(v)
+
+
+fmt_qty = _fmt_qty
+
+
 def _fmt_pct(v: Decimal) -> str:
     sign = "+" if v >= 0 else "−"
     return f"{sign}{abs(v)}%"

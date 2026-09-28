@@ -8,7 +8,7 @@ from roaring_kittens.alerts import send_alert
 from roaring_kittens.db.theses import get_active_theses
 from roaring_kittens.db.users import list_active_users
 from roaring_kittens.db.watchlist import list_watchlist
-from roaring_kittens.telegram.formatting import esc
+from roaring_kittens.telegram.formatting import fmt_price
 from roaring_kittens.users_service import get_cached_portfolio, get_user_broker
 
 log = structlog.get_logger()
@@ -166,11 +166,13 @@ async def watch_deal_levels(deps, bot, today: date) -> None:
             InlineKeyboardButton(text="Держу дальше",
                                  callback_data=f"deal_hold:{d.id}"),
         ]])
-        text = (f"🛑 Сделка №{d.deal_no} {d.ticker}: цена {price} ₽ — сработал "
-                f"сигнал выхода (ниже {d.exit_price} ₽). Рекомендую продать.{pnl}"
+        text = (f"🛑 Сделка №{d.deal_no} {d.ticker}: цена {fmt_price(price)} ₽ — "
+                f"сработал сигнал выхода (ниже {fmt_price(d.exit_price)} ₽). "
+                f"Рекомендую продать.{pnl}"
                 if kind == "exit" else
-                f"🎯 Сделка №{d.deal_no} {d.ticker}: цена {price} ₽ достигла цели "
-                f"{d.target_price} ₽. Можно фиксировать прибыль.{pnl}")
+                f"🎯 Сделка №{d.deal_no} {d.ticker}: цена {fmt_price(price)} ₽ "
+                f"достигла цели {fmt_price(d.target_price)} ₽. "
+                f"Можно фиксировать прибыль.{pnl}")
         try:
             await send_alert(deps, bot, d.user_id, text,
                              critical=(kind == "exit"), keyboard=kb)
@@ -211,7 +213,7 @@ async def price_watch_job(deps, bot) -> None:
                 await send_alert(
                     deps, bot, user_id,
                     f"{arrow} <b>{ticker}</b> {'+' if move > 0 else '−'}{abs(move)}% "
-                    f"за день ({esc(str(prev))} → {esc(str(last))} ₽). "
+                    f"за день ({fmt_price(prev)} → {fmt_price(last)} ₽). "
                     f"Разбор: /council {ticker}")
                 _deduper.mark(user_id, ticker, today)  # после отправки: сбой не глушит
             except Exception as exc:

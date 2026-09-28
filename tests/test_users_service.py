@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -7,7 +8,9 @@ from cryptography.fernet import Fernet
 
 from roaring_kittens.broker.models import PortfolioSnapshot
 from roaring_kittens.security.crypto import encrypt_secret
-from roaring_kittens.users_service import get_cached_portfolio, get_user_broker
+from roaring_kittens.users_service import (
+    cached_portfolio_age, get_cached_portfolio, get_user_broker,
+)
 
 KEY = Fernet.generate_key().decode()
 
@@ -96,6 +99,25 @@ async def test_portfolio_cache_ttl(monkeypatch):
     snap1 = await get_cached_portfolio(deps, 111, broker)
     snap2 = await get_cached_portfolio(deps, 111, broker)
     assert calls["n"] == 1 and snap1 is snap2          # из кэша
-    deps.portfolio_cache[111] = (time.monotonic() - 9999, snap1)  # состарили
+    assert cached_portfolio_age(deps, 111) < timedelta(seconds=5)
+    deps.portfolio_cache[111] = (time.monotonic() - 9999, snap1,
+                                 datetime.now(tz=timezone.utc) - timedelta(days=30))
+    assert cached_portfolio_age(deps, 111) > timedelta(days=29)  # возраст честный
     await get_cached_portfolio(deps, 111, broker)
     assert calls["n"] == 2                              # TTL истёк — перезапрос
+    assert cached_portfolio_age(deps, 111) < timedelta(seconds=5)  # обновился
+
+
+async def test_stale_snapshot_returned_on_failure_keeps_old_age():
+    """Tinkoff лежит: отдаём прошлый снимок, но возраст остаётся старым — потребитель видит."""
+    class DeadBroker:
+        async def get_portfolio(self):
+            raise RuntimeError("tls")
+
+    deps = _deps()
+    old = PortfolioSnapshot(total_value=Decimal("941"), positions=[])
+    deps.portfolio_cache[111] = (time.monotonic() - 9999, old,
+                                 datetime.now(tz=timezone.utc) - timedelta(days=30))
+    assert await get_cached_portfolio(deps, 111, DeadBroker()) is old
+    assert cached_portfolio_age(deps, 111) > timedelta(days=29)
+    assert cached_portfolio_age(deps, 999) is None

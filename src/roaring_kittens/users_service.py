@@ -1,5 +1,6 @@
 """Per-user брокеры (кэш инстансов) и TTL-кэш портфелей для частых джобов."""
 import time
+from datetime import datetime, timedelta, timezone
 
 import structlog
 
@@ -46,6 +47,8 @@ def invalidate_user_broker(deps, telegram_id: int) -> None:
 
 async def get_cached_portfolio(deps, telegram_id: int,
                                broker) -> PortfolioSnapshot | None:
+    """Кэш: (monotonic, snap, fetched_at_utc). При сбое отдаём ПРОШЛЫЙ снимок —
+    потребители обязаны смотреть cached_portfolio_age и не выдавать его за живой."""
     cached = deps.portfolio_cache.get(telegram_id)
     if cached and time.monotonic() - cached[0] < PORTFOLIO_TTL_SEC:
         return cached[1]
@@ -54,5 +57,14 @@ async def get_cached_portfolio(deps, telegram_id: int,
     except Exception as exc:
         log.warning("cached_portfolio_failed", user=telegram_id, error=str(exc))
         return cached[1] if cached else None
-    deps.portfolio_cache[telegram_id] = (time.monotonic(), snap)
+    deps.portfolio_cache[telegram_id] = (time.monotonic(), snap,
+                                         datetime.now(tz=timezone.utc))
     return snap
+
+
+def cached_portfolio_age(deps, telegram_id: int) -> timedelta | None:
+    """Сколько снимку лет; None — снимка нет (после рестарта)."""
+    cached = deps.portfolio_cache.get(telegram_id)
+    if not cached:
+        return None
+    return datetime.now(tz=timezone.utc) - cached[2]

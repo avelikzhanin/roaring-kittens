@@ -20,6 +20,15 @@ def test_idea_text_has_levels_size_and_disclaimer():
     assert "_" not in text   # HTML parse mode: markdown-курсив запрещён
 
 
+def test_idea_text_has_no_decimal_tails():
+    text = build_idea_text(deal_no=3, ticker="SBER", entry=Decimal("293.38000000"),
+                           target=Decimal("315.32000000"),
+                           exit_price=Decimal("257.24000000"),
+                           exit_note="x", rationale="r", confidence=0.6, sized=None)
+    assert "293.38 ₽" in text and "315.32 ₽" in text and "257.24 ₽" in text
+    assert "00000" not in text
+
+
 def test_idea_text_flags_over_risk_and_no_size():
     s = SizedSuggestion(qty=10, lots=1, cost=Decimal("2620"),
                         risk_rub=Decimal("170"), over_risk=True)

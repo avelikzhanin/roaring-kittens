@@ -462,6 +462,43 @@ git commit -m "fix: no Decimal tails in deal lines (fmt_price everywhere)"
 
 ---
 
+## Адверсарное ревью плана (2026-09-29, воркфлоу 3 ревьюера)
+
+16 находок → 14 уникальных подтверждено (0 отклонено). Изменения к снипетам выше:
+
+- **Старт без Tinkoff (major):** `main.run` оборачивает `universe.load()` в try/except —
+  логирует `universe_load_failed`, дёргает `health.tinkoff.note_failure`, стартует бота с
+  пустой вселенной; новая джоба `universe_reload_job` каждые 10 мин, пока `tickers()` пуст.
+  `list_shares` получает `@retry_async`. Гейт деплоя: `universe_loaded` с ЛЮБЫМ count
+  (при сбое MOEX ISS фолбэк на SEED даёт другое число) + отсутствие `Handshake failed`.
+- **Пульс — только системный брокер (major):** `TinkoffBroker(token, health=None)`;
+  декоратор `track` читает `self._health` и молчит, если None. `main.py` создаёт системный
+  брокер с `health=health.tinkoff`; `users_service` — юзерские без пульса (отозванный токен
+  друга — не «падение Tinkoff»).
+- **Дедуп по эпизоду (major):** `alerted_for: datetime|None` = down_since эпизода, о
+  котором уже сообщили; 🩺 шлём, если `down_since != alerted_for` ИЛИ дата (в tz настроек)
+  сменилась; при ✅ сбрасываем `alerted_for`/`alerted_on`. Дата — `ZoneInfo(deps.settings.tz)`.
+- **Пустой кэш + лежащий Tinkoff (major):** в `run_morning_digest` фолбэк
+  `broker.get_portfolio()` — в try: при исключении честное сообщение и return (LLM не
+  зовём). В `_sync_user` при `snap is None` — warning + return.
+- **Сверка не действует по застывшему снимку (major):** `get_cached_portfolio` возвращает
+  как раньше, но `_sync_user` проверяет `cached_portfolio_age(...)`: старше 1 часа →
+  `log.warning("sync_skipped_stale_portfolio")` и return — ни закрытий тезисов, ни expire
+  сделок по данным месячной давности.
+- **Шум по headline+body (major):** `is_noise` проверяет тот же текст, что и матчинг;
+  регэксп `лиг[аиеу] ВТБ|ВТБ[\s-]?Арен`; хосты `sportrbc.ru`, `sport-interfax.ru`
+  (`sport.interfax` — несуществующий, убран); лог `news_polled` пишет `fetched` ДО фильтра и
+  `dropped_noise`.
+- **fmt_price везде (major):** + прайс-алерт «за день» в price_watch (`prev`/`last`), +
+  `_q(sized.cost)`/`_q(sized.risk_rub)` в build_idea_text; `fmt_price(None) -> "—"`.
+- **Сертификаты (minor):** в репо и в образ — ТОЛЬКО `russian_trusted_root_ca_pem.crt`
+  (сервер шлёт полную цепочку; вендоринг Sub CA с истечением 03.2027 повторил бы инцидент);
+  `.gitattributes`: `certs/*.crt -text` — иначе `railway up` заливает CRLF-PEM из рабочего
+  дерева.
+- **get_last_prices([]) (minor):** ранний return вынесен наружу трекинга (обёртка).
+
+---
+
 ## Self-review checklist
 
 - Четыре пункта, согласованные с юзером: сертификаты ✅ (T1) · пульс ✅ (T2-T3) · честность данных ✅ (T4) · косметика+шум ✅ (T5-T6)

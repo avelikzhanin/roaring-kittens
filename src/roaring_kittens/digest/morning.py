@@ -28,9 +28,38 @@ DIGEST_SYSTEM = """Ты — утренний аналитик-ассистент
 Не выдумывай числа и события. Если новостей мало — так и скажи. Пиши по-русски."""
 
 
+STALE_BANNER_AFTER = timedelta(hours=1)
+STALE_ABORT_AFTER = timedelta(hours=24)
+MSK = timezone(timedelta(hours=3))
+
+
+def staleness_verdict(age: timedelta | None,
+                      now: datetime | None = None) -> tuple[str, str | None]:
+    """('ok'|'banner'|'abort', текст). Дайджест не должен выдавать старый снимок
+    счёта за сегодняшний (инцидент 09.2026 — месяц застывших цифр)."""
+    if age is None or age < STALE_BANNER_AFTER:
+        return "ok", None
+    now = now or datetime.now(tz=timezone.utc)
+    taken = (now - age).astimezone(MSK)
+    if age >= STALE_ABORT_AFTER:
+        return "abort", (f"⚠️ Не вижу твой счёт уже {age.days} дн — Tinkoff API не "
+                         f"отвечает (последние данные {taken:%d.%m %H:%M} МСК). "
+                         f"Дайджест приостановлен, пришлю обычный, как только "
+                         f"связь вернётся.")
+    return "banner", (f"⚠️ Данные счёта от {taken:%d.%m %H:%M} МСК — Tinkoff "
+                      f"временно недоступен, цифры ниже могли устареть.")
+
+
+NO_PORTFOLIO_TEXT = ("⚠️ Не вижу твой счёт — Tinkoff API не отвечает. Дайджест "
+                     "приостановлен, пришлю обычный, как только связь вернётся.")
+
+
 def build_digest_text(snap: PortfolioSnapshot, news_by_ticker: dict[str, list[NewsItem]],
-                      ai_summary: str | None) -> str:
-    parts = ["☀️ <b>Доброе утро!</b>", "", format_portfolio(snap), ""]
+                      ai_summary: str | None, banner: str | None = None) -> str:
+    parts = ["☀️ <b>Доброе утро!</b>", ""]
+    if banner:
+        parts += [banner, ""]
+    parts += [format_portfolio(snap), ""]
     if news_by_ticker:
         parts.append("📰 <b>Новости по позициям:</b>")
         for ticker, items in news_by_ticker.items():
@@ -79,12 +108,23 @@ async def run_morning_digest(deps: Deps, bot, chat_id: int, broker=None,
                              allow_spotlight: bool = True) -> None:
     """broker — брокер получателя; None = системный (обратная совместимость).
     allow_spotlight=False — бюджет исчерпан: тихое утро без LLM-разбора дня."""
-    from roaring_kittens.users_service import get_cached_portfolio
+    from roaring_kittens.users_service import cached_portfolio_age, get_cached_portfolio
     broker = broker or deps.broker
     # кэш: снимок positions_sync (8:50) переиспользуется в 9:00 — один Tinkoff-запрос
     snap = await get_cached_portfolio(deps, chat_id, broker)
-    if snap is None:
-        snap = await broker.get_portfolio()
+    if snap is None:  # кэш пуст (рестарт) и запрос упал — честно, без LLM
+        try:
+            snap = await broker.get_portfolio()
+        except Exception as exc:
+            log.warning("digest_aborted_no_portfolio", chat=chat_id, error=str(exc))
+            await bot.send_message(chat_id, NO_PORTFOLIO_TEXT)
+            return
+    kind, note = staleness_verdict(cached_portfolio_age(deps, chat_id))
+    if kind == "abort":
+        log.warning("digest_aborted_stale_portfolio", chat=chat_id)
+        await bot.send_message(chat_id, note)
+        return
+    banner = note if kind == "banner" else None
     tickers = [p.ticker for p in snap.positions]
     since = datetime.now(tz=timezone.utc) - timedelta(hours=16)
     news_by_ticker: dict[str, list[NewsItem]] = {}
@@ -115,9 +155,10 @@ async def run_morning_digest(deps: Deps, bot, chat_id: int, broker=None,
         except Exception as exc:
             log.error("digest_llm_failed", error=str(exc))
 
-    text = build_digest_text(snap, news_by_ticker, ai_summary)
+    text = build_digest_text(snap, news_by_ticker, ai_summary, banner=banner)
 
     from roaring_kittens.db.deals import list_deals
+    from roaring_kittens.telegram.formatting import fmt_price
     async with deps.session_factory() as session:
         open_deals = await list_deals(session, chat_id, statuses=("active",))
     if open_deals:
@@ -130,9 +171,10 @@ async def run_morning_digest(deps: Deps, bot, chat_id: int, broker=None,
             if now_p and entry:
                 p = ((now_p - entry) / entry * 100).quantize(Decimal("0.1"))
                 pnl = f" · {'+' if p >= 0 else ''}{p}%"
-            deal_lines.append(f"№{d.deal_no} {d.ticker} · вход {entry}"
-                              f"{f' → {now_p}' if now_p else ''} ₽{pnl}"
-                              f" · цель {d.target_price} / выход {d.exit_price}")
+            deal_lines.append(f"№{d.deal_no} {d.ticker} · вход {fmt_price(entry)}"
+                              f"{f' → {fmt_price(now_p)}' if now_p else ''} ₽{pnl}"
+                              f" · цель {fmt_price(d.target_price)} / "
+                              f"выход {fmt_price(d.exit_price)}")
         text += "\n" + "\n".join(deal_lines)
 
     # Тихое утро: новостей нет, но дайджест не должен быть пустым — даём разбор дня по ротации.

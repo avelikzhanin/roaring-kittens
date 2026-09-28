@@ -14,6 +14,7 @@ from roaring_kittens.db.deals import (
 )
 from roaring_kittens.db.users import get_active_user
 from roaring_kittens.deps import Deps
+from roaring_kittens.telegram.formatting import fmt_price
 
 log = structlog.get_logger()
 router = Router()
@@ -35,15 +36,17 @@ def format_deals(active: list[DealRecord], accepted: list[DealRecord],
             now_price = prices.get(d.figi)
             pnl = f" · {'+' if _pct(entry, now_price) >= 0 else ''}{_pct(entry, now_price)}%" \
                 if (now_price and entry) else ""
-            lines.append(f"№{d.deal_no} {d.ticker} · вход {entry} ₽"
-                         f"{f' → сейчас {now_price} ₽' if now_price else ''}{pnl}"
-                         f" · цель {d.target_price} / выход {d.exit_price}")
+            lines.append(f"№{d.deal_no} {d.ticker} · вход {fmt_price(entry)} ₽"
+                         f"{f' → сейчас {fmt_price(now_price)} ₽' if now_price else ''}{pnl}"
+                         f" · цель {fmt_price(d.target_price)} / "
+                         f"выход {fmt_price(d.exit_price)}")
         lines.append("")
     if accepted:  # принята, но покупки на счёте ещё не видно — без PnL
         lines.append("⏳ <b>Ждут покупки:</b>")
         for d in accepted:
-            lines.append(f"№{d.deal_no} {d.ticker} · план входа ~{d.entry_suggested} ₽ "
-                         f"· цель {d.target_price} / выход {d.exit_price}")
+            lines.append(f"№{d.deal_no} {d.ticker} · план входа "
+                         f"~{fmt_price(d.entry_suggested)} ₽ · цель "
+                         f"{fmt_price(d.target_price)} / выход {fmt_price(d.exit_price)}")
         lines.append("")
     if closed:
         lines.append("📕 <b>Закрытые:</b>")
@@ -101,8 +104,9 @@ async def cmd_deals(message: Message, deps: Deps) -> None:
     for d in proposed:
         await message.answer(
             f"💡 <b>Ждёт решения: идея №{d.deal_no} — купить {d.ticker} "
-            f"по ~{d.entry_suggested} ₽</b>\n"
-            f"🎯 Цель: {d.target_price} ₽ · 🛑 Продаём если: ниже {d.exit_price} ₽",
+            f"по ~{fmt_price(d.entry_suggested)} ₽</b>\n"
+            f"🎯 Цель: {fmt_price(d.target_price)} ₽ · 🛑 Продаём если: ниже "
+            f"{fmt_price(d.exit_price)} ₽",
             reply_markup=idea_keyboard(d.id))
 
 
@@ -159,8 +163,8 @@ async def cb_take(callback: CallbackQuery, deps: Deps) -> None:
     await callback.message.answer(
         f"📝 Сделка №{deal.deal_no} {deal.ticker} принята.\n"
         f"Купи в приложении Т-Инвестиций — я увижу покупку на счёте при "
-        f"ближайшей сверке и начну следить за целью {deal.target_price} ₽ "
-        f"и выходом {deal.exit_price} ₽.")
+        f"ближайшей сверке и начну следить за целью {fmt_price(deal.target_price)} ₽ "
+        f"и выходом {fmt_price(deal.exit_price)} ₽.")
 
 
 @router.callback_query(F.data.startswith("deal_skip:"))

@@ -1,7 +1,7 @@
 """Ежедневная сверка портфелей ВСЕХ юзеров с их тезисами: закрытия и новые позиции."""
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import structlog
@@ -20,11 +20,14 @@ from roaring_kittens.db.theses import (
 from roaring_kittens.db.users import list_active_users
 from roaring_kittens.telegram.formatting import esc
 from roaring_kittens.universe.universe import Instrument
-from roaring_kittens.users_service import get_cached_portfolio, get_user_broker
+from roaring_kittens.users_service import (
+    cached_portfolio_age, get_cached_portfolio, get_user_broker,
+)
 
 log = structlog.get_logger()
 
 MIN_THESIS_WEIGHT_PP = Decimal("5")
+SYNC_MAX_SNAPSHOT_AGE = timedelta(hours=1)
 
 
 @dataclass(frozen=True)
@@ -84,7 +87,14 @@ async def _sync_user(deps, bot, owner_id: int, broker) -> None:
     # Кэш-портфель: снимок 8:50 переиспользуется дайджестом в 9:00 (один запрос)
     snap = await get_cached_portfolio(deps, owner_id, broker)
     if snap is None:
-        log.error("sync_portfolio_failed", user=owner_id)
+        log.warning("sync_portfolio_failed", user=owner_id)
+        return
+    # По застывшему снимку (Tinkoff лежит) действовать нельзя: закрыли бы
+    # сопровождение и сняли принятые сделки по данным месячной давности
+    age = cached_portfolio_age(deps, owner_id)
+    if age is not None and age > SYNC_MAX_SNAPSHOT_AGE:
+        log.warning("sync_skipped_stale_portfolio", user=owner_id,
+                    age_hours=round(age.total_seconds() / 3600, 1))
         return
     from roaring_kittens.deals_service import sync_deals_for_user
     try:  # сделки: активация accepted / закрытие проданных / конвертация

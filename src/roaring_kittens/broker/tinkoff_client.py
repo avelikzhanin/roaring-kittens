@@ -4,6 +4,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from tinkoff.invest import AsyncClient, CandleInterval
 from tinkoff.invest.utils import money_to_decimal, now, quotation_to_decimal
 
+from roaring_kittens import health
 from roaring_kittens.broker.models import Candle, DividendItem, PortfolioSnapshot, Position
 from roaring_kittens.utils.retry import retry_async
 
@@ -35,8 +36,9 @@ def map_last_prices(resp) -> dict[str, Decimal]:
 
 
 class TinkoffBroker:
-    def __init__(self, token: str):
+    def __init__(self, token: str, health_tracker: health.DependencyHealth | None = None):
         self._token = token
+        self._health = health_tracker  # только у системного брокера (пульс владельцу)
         self._figi_map: dict[str, tuple[str, str]] | None = None
 
     async def _ensure_figi_map(self, client) -> dict[str, tuple[str, str]]:
@@ -45,6 +47,7 @@ class TinkoffBroker:
             self._figi_map = {s.figi: (s.ticker, s.name) for s in resp.instruments}
         return self._figi_map
 
+    @health.track
     @retry_async(attempts=3, base_delay=1.0)
     async def get_portfolio(self) -> PortfolioSnapshot:
         async with AsyncClient(self._token) as client:
@@ -53,6 +56,7 @@ class TinkoffBroker:
             raw = await client.operations.get_portfolio(account_id=accounts.accounts[0].id)
             return map_portfolio(raw, figi_map)
 
+    @health.track
     @retry_async(attempts=3, base_delay=1.0)
     async def get_daily_candles(self, figi: str, days: int = 35) -> list[Candle]:
         async with AsyncClient(self._token) as client:
@@ -70,6 +74,7 @@ class TinkoffBroker:
                 for c in resp.candles if c.is_complete
             ]
 
+    @health.track
     @retry_async(attempts=3, base_delay=1.0)
     async def get_dividends(self, figi: str, years_back: int = 3) -> list[DividendItem]:
         async with AsyncClient(self._token) as client:
@@ -90,14 +95,20 @@ class TinkoffBroker:
                 for d in resp.dividends
             ]
 
-    @retry_async(attempts=3, base_delay=1.0)
     async def get_last_prices(self, figis: list[str]) -> dict[str, Decimal]:
         if not figis:
-            return {}
+            return {}  # без сети — не «успех Tinkoff» для пульса
+        return await self._get_last_prices(figis)
+
+    @health.track
+    @retry_async(attempts=3, base_delay=1.0)
+    async def _get_last_prices(self, figis: list[str]) -> dict[str, Decimal]:
         async with AsyncClient(self._token) as client:
             resp = await client.market_data.get_last_prices(figi=figis)
             return map_last_prices(resp)
 
+    @health.track
+    @retry_async(attempts=3, base_delay=1.0)
     async def list_shares(self) -> dict[str, tuple[str, str, int]]:
         """ticker -> (figi, name, lot) для маппинга universe и сайзинга сделок."""
         async with AsyncClient(self._token) as client:
